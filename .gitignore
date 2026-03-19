@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+*.egg
+dist/
+build/
+.eggs/
+venv/
+.venv/
+env/
+
+# IDE / Editor
+.vs/
+.vscode/
+.claude/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS
+desktop.ini
+
+# Data folders — inputs, outputs, analysis results
+stringart/input/
+stringart/output/
+reconnect/input/
+reconnect/output/
+reconnect/analysis/
