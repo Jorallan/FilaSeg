@@ -13,7 +13,7 @@ from skimage.segmentation import find_boundaries
 
 ALLOWED_EXTS = [".png", ".tif", ".tiff", ".jpg", ".jpeg", ".bmp"]
 
-DEFAULT_INPUT_DIR = r"C:\Repos\filaments_quantification\reconnect\analysis\cnt_orient_0003_merge\v5"
+DEFAULT_INPUT_DIR = r"C:\Repos\filaments_quantification\reconnect\analysis\cnt_orient_0003_merge\maskcmp_v6_skel"
 DEFAULT_BASE = None  # e.g. "cnt_orient_0001_merge"
 
 def read_gray_any(path: Path) -> np.ndarray:

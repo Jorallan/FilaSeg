@@ -212,18 +212,26 @@ def trace_from_tip(skel: np.ndarray, tip: Coord, max_steps: int) -> np.ndarray:
     return np.asarray(trace, dtype=np.float32)
 
 
-def _fit_local_tangent_and_curvature(trace_rc: np.ndarray, fit_points: int) -> Tuple[np.ndarray, float]:
+def _fit_local_tangent_and_curvature(trace_rc: np.ndarray, fit_points: int) -> Tuple[np.ndarray, float, dict]:
     """
     Robust local geometry from ordered centerline points.
-    Tangent is estimated in a local PCA frame and signed tip->inward.
+    Tangent is estimated via polynomial derivative at the tip (curvature-aware).
     Curvature is a quadratic residual in the local normal direction.
+    Also returns an 'extra' context dict for the arc extrapolation gate.
     """
+    _z2 = np.asarray([0.0, 0.0], dtype=np.float32)
+    _empty_extra: dict = {
+        "a": 0.0, "b": 0.0, "su_tip": 0.0, "span": 1.0,
+        "axis_xy": np.asarray([1.0, 0.0], dtype=np.float32),
+        "normal_xy": np.asarray([0.0, 1.0], dtype=np.float32),
+        "tip_xy": np.asarray([0.0, 0.0], dtype=np.float32),
+    }
     if trace_rc is None or len(trace_rc) == 0:
-        return np.asarray([0.0, 0.0], dtype=np.float32), 0.0
+        return _z2.copy(), 0.0, _empty_extra
 
     pts = np.asarray(trace_rc[:max(2, int(fit_points))], dtype=np.float32)
     if pts.shape[0] < 2:
-        return np.asarray([0.0, 0.0], dtype=np.float32), 0.0
+        return _z2.copy(), 0.0, _empty_extra
 
     xy = np.stack([pts[:, 1], pts[:, 0]], axis=1)
     ctr = xy.mean(axis=0, keepdims=True)
@@ -241,7 +249,7 @@ def _fit_local_tangent_and_curvature(trace_rc: np.ndarray, fit_points: int) -> T
         tangent_rc = np.asarray([pts[-1, 0] - pts[0, 0], pts[-1, 1] - pts[0, 1]], dtype=np.float32)
         nt = float(np.linalg.norm(tangent_rc))
         if nt < 1e-9:
-            return np.asarray([0.0, 0.0], dtype=np.float32), 0.0
+            return _z2.copy(), 0.0, _empty_extra
     tangent_rc /= nt
 
     # Local polynomial fit in the PCA frame.
@@ -255,23 +263,85 @@ def _fit_local_tangent_and_curvature(trace_rc: np.ndarray, fit_points: int) -> T
     s0 = s - s.min()
     span = float(max(1e-6, s0.max()))
     su = s0 / span
+    # tip is at index 0; its normalized position (may be >0 if s[0] > s.min())
+    su_tip = float(s0[0] / span)
 
     deg = 2 if len(su) >= 5 and np.unique(np.round(su, 4)).size >= 3 else 1
+    a_coeff, b_coeff = 0.0, 0.0
+    curvature = 0.0
     try:
         coeff = np.polyfit(su, n, deg=deg)
         pred = np.polyval(coeff, su)
-        # For n(s)=a*s^2+b*s+c on normalized coordinate, convert second derivative back using span.
         if deg == 2:
-            a = float(coeff[0])
-            curvature = abs(2.0 * a) / (span * span + 1e-9)
+            a_coeff = float(coeff[0])
+            b_coeff = float(coeff[1])
+            curvature = abs(2.0 * a_coeff) / (span * span + 1e-9)
         else:
+            a_coeff = 0.0
+            b_coeff = float(coeff[0])
             curvature = 0.0
         rms = float(np.sqrt(np.mean((n - pred) ** 2)))
         curvature += 0.10 * rms / (span + 1e-9)
+
+        # Polynomial tangent at the tip (Fix A).
+        # dn/dsu at su_tip gives the lateral slope; the unit tangent in the PCA frame
+        # is proportional to [1, dn/dsu_tip / span] in (axis, normal) coordinates.
+        dn_dsu_tip = 2.0 * a_coeff * su_tip + b_coeff
+        tangent_xy_poly = axis_xy + (dn_dsu_tip / span) * normal_xy
+        nt_poly = float(np.linalg.norm(tangent_xy_poly))
+        if nt_poly > 1e-9:
+            tangent_xy_poly /= nt_poly
+            tangent_rc = np.asarray([tangent_xy_poly[1], tangent_xy_poly[0]], dtype=np.float32)
+        # else: keep PCA tangent as fallback
+
     except Exception:
+        a_coeff, b_coeff = 0.0, 0.0
         curvature = 0.0
 
-    return tangent_rc.astype(np.float32), float(curvature)
+    extra: dict = {
+        "a": a_coeff,
+        "b": b_coeff,
+        "su_tip": su_tip,
+        "span": span,
+        "axis_xy": axis_xy.copy(),
+        "normal_xy": normal_xy.copy(),
+        "tip_xy": xy[0].copy(),
+    }
+    return tangent_rc.astype(np.float32), float(curvature), extra
+
+
+def _arc_predicted_position(extra: dict, s_out: float) -> np.ndarray:
+    """
+    Predict where the filament would land if it continued OUTWARD from the tip
+    by s_out pixels, following the fitted polynomial curve.
+
+    Within the polynomial's fitting span the quadratic curvature term is used;
+    beyond it the prediction falls back to the tangent direction (linear) to
+    avoid polynomial divergence on long extrapolations.
+
+    Returns the predicted position as [x, y] in XY (col, row) coordinates.
+    """
+    a = float(extra.get("a", 0.0))
+    b = float(extra.get("b", 0.0))
+    su_tip = float(extra.get("su_tip", 0.0))
+    span = float(extra.get("span", 1.0))
+    axis_xy = np.asarray(extra.get("axis_xy", [1.0, 0.0]), dtype=np.float32)
+    normal_xy = np.asarray(extra.get("normal_xy", [0.0, 1.0]), dtype=np.float32)
+    tip_xy = np.asarray(extra.get("tip_xy", [0.0, 0.0]), dtype=np.float32)
+
+    if s_out <= span:
+        # Within fitting range: use full polynomial curvature.
+        su_out = su_tip - s_out / span
+        delta_su = su_out - su_tip  # = -s_out / span
+        n_extrap = delta_su * (a * (su_out + su_tip) + b)
+    else:
+        # Beyond fitting range: linear extrapolation using tangent slope at tip.
+        dn_dsu_tip = 2.0 * a * su_tip + b
+        n_extrap = (-s_out / span) * dn_dsu_tip
+
+    # Outward along-axis displacement (−axis_xy direction) plus lateral deviation.
+    predicted_xy = tip_xy + (-s_out) * axis_xy + n_extrap * normal_xy
+    return predicted_xy
 
 
 def cosine(a: np.ndarray, b: np.ndarray) -> float:
@@ -326,13 +396,20 @@ def _bbox_intersects(a: Tuple[int, int, int, int], b: Tuple[int, int, int, int],
     return not (ar1 + pad < br0 or br1 + pad < ar0 or ac1 + pad < bc0 or bc1 + pad < ac0)
 
 
-def _component_union_label(components: List["Component"]) -> np.ndarray:
+def _component_union_label(
+    components: List["Component"],
+    *,
+    use_skeleton: bool = False,
+) -> np.ndarray:
     if not components:
         return np.zeros((1, 1), dtype=np.int32)
     shape = components[0].mask.shape
     lab = np.zeros(shape, dtype=np.int32)
     for c in sorted([x for x in components if x.exist], key=lambda z: z.id):
-        lab[c.mask] = int(c.id)
+        geom = c.skel if use_skeleton and getattr(c, "skel", None) is not None else c.mask
+        if geom is None or not np.any(geom):
+            geom = c.mask
+        lab[geom] = int(c.id)
     return lab
 
 
@@ -390,7 +467,7 @@ def _enumerate_tip_geoms(
     tip_items = []
     for p in eps:
         trace = trace_from_tip(skel, p, trace_steps)
-        dvec, curv = _fit_local_tangent_and_curvature(trace, fit_points)
+        dvec, curv, extra = _fit_local_tangent_and_curvature(trace, fit_points)
         support = _tip_trace_length(trace)
         tip_items.append({
             "point": p,
@@ -398,19 +475,21 @@ def _enumerate_tip_geoms(
             "dir": dvec,
             "curv": float(curv),
             "support": float(support),
+            "extra": extra,
         })
 
     if not tip_items:
         p0, p1 = _choose_tip_pair(skel, fallback_mask)
         for p in ([p0] if p0 == p1 else [p0, p1]):
             trace = trace_from_tip(skel, p, trace_steps)
-            dvec, curv = _fit_local_tangent_and_curvature(trace, fit_points)
+            dvec, curv, extra = _fit_local_tangent_and_curvature(trace, fit_points)
             tip_items.append({
                 "point": p,
                 "trace": trace,
                 "dir": dvec,
                 "curv": float(curv),
                 "support": float(_tip_trace_length(trace)),
+                "extra": extra,
             })
 
     good = [t for t in tip_items if float(t["support"]) >= float(min_tip_trace_len)]
@@ -433,6 +512,7 @@ def _enumerate_tip_geoms(
         name = f"t{i}"
         out[name] = t
     return out
+
 
 # ============================================================
 # Component object
@@ -459,15 +539,22 @@ class Component:
     bbox: Tuple[int, int, int, int] = (0, -1, 0, -1)
     tips: Dict[str, Dict[str, object]] = None
 
-    def refresh_geom(self, trace_steps: int, fit_points: int):
+    def refresh_geom(
+        self,
+        trace_steps: int,
+        fit_points: int,
+        *,
+        max_tips: Optional[int] = None,
+        min_tip_trace_len: float = 3.0,
+    ):
         self.skel = skeletonize(self.mask)
         self.tips = _enumerate_tip_geoms(
             self.skel,
             self.mask,
             trace_steps=trace_steps,
             fit_points=fit_points,
-            max_tips=8,
-            min_tip_trace_len=3.0,
+            max_tips=8 if max_tips is None else int(max_tips),
+            min_tip_trace_len=float(min_tip_trace_len),
             dedupe_sep_px=2.0,
         )
 
@@ -511,17 +598,23 @@ def extract_components(
     min_area: int,
     start_id: int,
     *,
-    skeletonize_each: bool = False
+    skeletonize_each: bool = False,
+    component_mask_mode: str = "full",
 ) -> Tuple[List[Component], int]:
     lbl = cc_label(branch_bin, connectivity=2)
     comps: List[Component] = []
     cid = start_id
+    mask_mode = str(component_mask_mode).strip().lower()
     for k in range(1, lbl.max() + 1):
         m = (lbl == k)
         if int(m.sum()) < int(min_area):
             continue
-        if skeletonize_each and not np.any(skeletonize(m)):
-            continue
+        if skeletonize_each:
+            sk = skeletonize(m)
+            if not np.any(sk):
+                continue
+            if mask_mode in {"skeletonized", "skeleton", "thin", "v5"}:
+                m = sk
         comps.append(Component(id=cid, layer=layer, mask=m.astype(bool)))
         cid += 1
     return comps, cid
@@ -784,6 +877,27 @@ def _evaluate_tip_pair(
     if curv_delta > max_curv_delta:
         return None
 
+    # Arc extrapolation gate: predict where each tip's curve would land if it
+    # continued outward by `dist` pixels. If the predicted landing is farther
+    # than max_arc_miss_frac * dist from the partner tip, this is not a smooth
+    # geometric continuation — reject. Works for both straight and curved filaments;
+    # beneficial mainly for the curved case where tangent direction alone misleads.
+    max_arc_miss_frac = float(thr.get("max_arc_miss_frac", 1.0))  # 1.0 = disabled
+    if max_arc_miss_frac < 0.99 and dist > 4.0:
+        b_extra = (base.tips or {}).get(base_tip_name, {}).get("extra", None)
+        t_extra = (tar.tips or {}).get(tar_tip_name, {}).get("extra", None)
+        if b_extra is not None and t_extra is not None:
+            bp_xy = np.asarray([float(bp[1]), float(bp[0])], dtype=np.float32)
+            tp_xy = np.asarray([float(tp[1]), float(tp[0])], dtype=np.float32)
+            pred_from_base = _arc_predicted_position(b_extra, dist)
+            pred_from_tar  = _arc_predicted_position(t_extra, dist)
+            arc_miss = 0.5 * (
+                float(np.linalg.norm(pred_from_base - tp_xy))
+                + float(np.linalg.norm(pred_from_tar  - bp_xy))
+            )
+            if arc_miss > max_arc_miss_frac * dist:
+                return None
+
     bridge_pts = _sample_hermite_bridge(
         bp,
         tp,
@@ -886,9 +1000,16 @@ def reconnect_components(components: List[Component], cfg: Dict) -> List[Compone
     search_size = int(thr.get("search_size_px", 25))
     candidate_layers = str(thr.get("candidate_layers", "all")).lower().strip()
     overlap_kill_thr = float(thr.get("overlap_kill_thr", 0.70))
+    max_component_tips = int(adv.get("max_component_tips", 8))
+    min_tip_trace_len = float(adv.get("min_tip_trace_len_px", 3.0))
 
     for c in components:
-        c.refresh_geom(trace_steps, fit_points)
+        c.refresh_geom(
+            trace_steps,
+            fit_points,
+            max_tips=max_component_tips,
+            min_tip_trace_len=min_tip_trace_len,
+        )
 
     def _alive() -> List[Component]:
         return [c for c in components if c.exist]
@@ -916,7 +1037,11 @@ def reconnect_components(components: List[Component], cfg: Dict) -> List[Compone
             lab = layer_labels.get(lay, None)
             if lab is None:
                 continue
-            tip_points = [tuple(int(v) for v in t["point"]) for t in getattr(base, "tips", {}).values()]                if isinstance(getattr(base, "tips", None), dict) and len(base.tips) > 0 else [base.lt, base.rt]
+            tip_points = (
+                [tuple(int(v) for v in t["point"]) for t in getattr(base, "tips", {}).values()]
+                if isinstance(getattr(base, "tips", None), dict) and len(base.tips) > 0
+                else [base.lt, base.rt]
+            )
             for tip in tip_points:
                 vals = _sample_labels_in_neighborhood(lab, tip, search_size)
                 for cid in np.unique(vals):
@@ -982,7 +1107,9 @@ def reconnect_components(components: List[Component], cfg: Dict) -> List[Compone
             break
 
         layer_labels = _build_layer_labels()
-        global_label = _component_union_label(alive)
+        # Use thin skeleton centerlines for bridge intrusion across v6 modes.
+        # This keeps nearby thick masks from falsely blocking short, clean joins.
+        global_label = _component_union_label(alive, use_skeleton=True)
         id2comp = _id2comp()
 
         proposals: List[Proposal] = []
@@ -1017,7 +1144,12 @@ def reconnect_components(components: List[Component], cfg: Dict) -> List[Compone
                 break
             # if only kills happened, continue another pass
             for c in _alive():
-                c.refresh_geom(trace_steps, fit_points)
+                c.refresh_geom(
+                    trace_steps,
+                    fit_points,
+                    max_tips=max_component_tips,
+                    min_tip_trace_len=min_tip_trace_len,
+                )
             continue
 
         # Deduplicate by unordered pair: keep the best proposal for each pair.
@@ -1057,7 +1189,12 @@ def reconnect_components(components: List[Component], cfg: Dict) -> List[Compone
             keep.mask = np.logical_or(keep.mask, bridge_mask)
             kill.exist = False
 
-            keep.refresh_geom(trace_steps, fit_points)
+            keep.refresh_geom(
+                trace_steps,
+                fit_points,
+                max_tips=max_component_tips,
+                min_tip_trace_len=min_tip_trace_len,
+            )
 
             used_ids.add(base.id)
             used_ids.add(tar.id)

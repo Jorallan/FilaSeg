@@ -177,18 +177,26 @@ def trace_from_tip(skel: np.ndarray, tip: Coord, max_steps: int) -> np.ndarray:
     return np.asarray(trace, dtype=np.float32)
 
 
-def _fit_local_tangent_and_curvature(trace_rc: np.ndarray, fit_points: int) -> Tuple[np.ndarray, float]:
+def _fit_local_tangent_and_curvature(trace_rc: np.ndarray, fit_points: int) -> Tuple[np.ndarray, float, dict]:
     """
     Robust local geometry from ordered centerline points.
-    Tangent is estimated in a local PCA frame and signed tip->inward.
+    Tangent is estimated via polynomial derivative at the tip (curvature-aware).
     Curvature is a quadratic residual in the local normal direction.
+    Also returns an 'extra' context dict for the arc extrapolation gate.
     """
+    _z2 = np.asarray([0.0, 0.0], dtype=np.float32)
+    _empty_extra: dict = {
+        "a": 0.0, "b": 0.0, "su_tip": 0.0, "span": 1.0,
+        "axis_xy": np.asarray([1.0, 0.0], dtype=np.float32),
+        "normal_xy": np.asarray([0.0, 1.0], dtype=np.float32),
+        "tip_xy": np.asarray([0.0, 0.0], dtype=np.float32),
+    }
     if trace_rc is None or len(trace_rc) == 0:
-        return np.asarray([0.0, 0.0], dtype=np.float32), 0.0
+        return _z2.copy(), 0.0, _empty_extra
 
     pts = np.asarray(trace_rc[:max(2, int(fit_points))], dtype=np.float32)
     if pts.shape[0] < 2:
-        return np.asarray([0.0, 0.0], dtype=np.float32), 0.0
+        return _z2.copy(), 0.0, _empty_extra
 
     xy = np.stack([pts[:, 1], pts[:, 0]], axis=1)
     ctr = xy.mean(axis=0, keepdims=True)
@@ -206,7 +214,7 @@ def _fit_local_tangent_and_curvature(trace_rc: np.ndarray, fit_points: int) -> T
         tangent_rc = np.asarray([pts[-1, 0] - pts[0, 0], pts[-1, 1] - pts[0, 1]], dtype=np.float32)
         nt = float(np.linalg.norm(tangent_rc))
         if nt < 1e-9:
-            return np.asarray([0.0, 0.0], dtype=np.float32), 0.0
+            return _z2.copy(), 0.0, _empty_extra
     tangent_rc /= nt
 
     # Local polynomial fit in the PCA frame.
@@ -220,23 +228,70 @@ def _fit_local_tangent_and_curvature(trace_rc: np.ndarray, fit_points: int) -> T
     s0 = s - s.min()
     span = float(max(1e-6, s0.max()))
     su = s0 / span
+    su_tip = float(s0[0] / span)
 
     deg = 2 if len(su) >= 5 and np.unique(np.round(su, 4)).size >= 3 else 1
+    a_coeff, b_coeff = 0.0, 0.0
+    curvature = 0.0
     try:
         coeff = np.polyfit(su, n, deg=deg)
         pred = np.polyval(coeff, su)
-        # For n(s)=a*s^2+b*s+c on normalized coordinate, convert second derivative back using span.
         if deg == 2:
-            a = float(coeff[0])
-            curvature = abs(2.0 * a) / (span * span + 1e-9)
+            a_coeff = float(coeff[0])
+            b_coeff = float(coeff[1])
+            curvature = abs(2.0 * a_coeff) / (span * span + 1e-9)
         else:
+            a_coeff = 0.0
+            b_coeff = float(coeff[0])
             curvature = 0.0
         rms = float(np.sqrt(np.mean((n - pred) ** 2)))
         curvature += 0.10 * rms / (span + 1e-9)
+
+        # Polynomial tangent at the tip.
+        dn_dsu_tip = 2.0 * a_coeff * su_tip + b_coeff
+        tangent_xy_poly = axis_xy + (dn_dsu_tip / span) * normal_xy
+        nt_poly = float(np.linalg.norm(tangent_xy_poly))
+        if nt_poly > 1e-9:
+            tangent_xy_poly /= nt_poly
+            tangent_rc = np.asarray([tangent_xy_poly[1], tangent_xy_poly[0]], dtype=np.float32)
+
     except Exception:
+        a_coeff, b_coeff = 0.0, 0.0
         curvature = 0.0
 
-    return tangent_rc.astype(np.float32), float(curvature)
+    extra: dict = {
+        "a": a_coeff, "b": b_coeff, "su_tip": su_tip, "span": span,
+        "axis_xy": axis_xy.copy(), "normal_xy": normal_xy.copy(),
+        "tip_xy": xy[0].copy(),
+    }
+    return tangent_rc.astype(np.float32), float(curvature), extra
+
+
+def _arc_predicted_position(extra: dict, s_out: float) -> np.ndarray:
+    """
+    Predict where the filament would land if it continued OUTWARD from the tip
+    by s_out pixels, following the fitted polynomial curve.
+    Beyond the fitting span the prediction falls back to the tangent direction.
+    Returns the predicted position as [x, y] in XY (col, row) coordinates.
+    """
+    a = float(extra.get("a", 0.0))
+    b = float(extra.get("b", 0.0))
+    su_tip = float(extra.get("su_tip", 0.0))
+    span = float(extra.get("span", 1.0))
+    axis_xy = np.asarray(extra.get("axis_xy", [1.0, 0.0]), dtype=np.float32)
+    normal_xy = np.asarray(extra.get("normal_xy", [0.0, 1.0]), dtype=np.float32)
+    tip_xy = np.asarray(extra.get("tip_xy", [0.0, 0.0]), dtype=np.float32)
+
+    if s_out <= span:
+        su_out = su_tip - s_out / span
+        delta_su = su_out - su_tip
+        n_extrap = delta_su * (a * (su_out + su_tip) + b)
+    else:
+        dn_dsu_tip = 2.0 * a * su_tip + b
+        n_extrap = (-s_out / span) * dn_dsu_tip
+
+    predicted_xy = tip_xy + (-s_out) * axis_xy + n_extrap * normal_xy
+    return predicted_xy
 
 
 def cosine(a: np.ndarray, b: np.ndarray) -> float:
@@ -330,20 +385,55 @@ class Component:
     rd: Optional[np.ndarray] = None
     lcurv: float = 0.0
     rcurv: float = 0.0
+    lextra: dict = None  # arc extrapolation context for left tip
+    rextra: dict = None  # arc extrapolation context for right tip
+    tips: dict = None    # all endpoints keyed "t0","t1",... (superset of lt/rt)
     skel_len: float = 0.0
     mean_width: float = 0.0
     bbox: Tuple[int, int, int, int] = (0, -1, 0, -1)
 
-    def refresh_geom(self, trace_steps: int, fit_points: int):
+    def refresh_geom(self, trace_steps: int, fit_points: int, max_tips: int = 6):
         self.skel = skeletonize(self.mask)
-        self.lt, self.rt = _choose_tip_pair(self.skel, self.mask)
-        self.ltrace = trace_from_tip(self.skel, self.lt, trace_steps)
-        self.rtrace = trace_from_tip(self.skel, self.rt, trace_steps)
-        self.ld, self.lcurv = _fit_local_tangent_and_curvature(self.ltrace, fit_points)
-        self.rd, self.rcurv = _fit_local_tangent_and_curvature(self.rtrace, fit_points)
         self.skel_len = float(max(1, np.count_nonzero(self.skel)))
         self.mean_width = float(max(1.0, float(np.count_nonzero(self.mask)) / self.skel_len))
         self.bbox = _bbox_from_mask(self.mask)
+
+        # Enumerate all skeleton endpoints (up to max_tips) so the engine can
+        # try every viable tip pair, not just the globally farthest two.
+        eps = endpoints_from_skeleton(self.skel)
+        if eps.shape[0] == 0:
+            # Fallback: use the two PCA extremes from the mask.
+            self.lt, self.rt = _choose_tip_pair(self.skel, self.mask)
+            ep_list = [self.lt, self.rt]
+        else:
+            ep_list = [tuple(int(v) for v in e) for e in eps[:max_tips]]
+            # Keep lt/rt as the farthest pair for backward compat.
+            self.lt, self.rt = _choose_tip_pair(self.skel, self.mask)
+
+        self.tips = {}
+        for i, p in enumerate(ep_list):
+            tr = trace_from_tip(self.skel, p, trace_steps)
+            d, c, ex = _fit_local_tangent_and_curvature(tr, fit_points)
+            self.tips[f"t{i}"] = {"point": p, "dir": d, "curv": c, "trace": tr, "extra": ex}
+
+        # Populate lt/rt fields from the first two tips for backward compat.
+        names = list(self.tips.keys())
+        t0 = self.tips[names[0]]
+        self.ltrace = t0["trace"]
+        self.ld = np.asarray(t0["dir"], dtype=np.float32)
+        self.lcurv = float(t0["curv"])
+        self.lextra = t0["extra"]
+        if len(names) >= 2:
+            t1 = self.tips[names[1]]
+            self.rtrace = t1["trace"]
+            self.rd = np.asarray(t1["dir"], dtype=np.float32)
+            self.rcurv = float(t1["curv"])
+            self.rextra = t1["extra"]
+        else:
+            self.rtrace = self.ltrace
+            self.rd = self.ld.copy()
+            self.rcurv = self.lcurv
+            self.rextra = self.lextra
 
 
 # ============================================================
@@ -356,7 +446,8 @@ def extract_components(
     min_area: int,
     start_id: int,
     *,
-    skeletonize_each: bool = False
+    skeletonize_each: bool = False,
+    component_mask_mode: str = "skeletonized",
 ) -> Tuple[List[Component], int]:
     lbl = cc_label(branch_bin, connectivity=2)
     comps: List[Component] = []
@@ -427,6 +518,9 @@ class Proposal:
 
 
 def _tip_data(comp: Component, name: str) -> Tuple[Coord, np.ndarray, float, np.ndarray]:
+    if isinstance(getattr(comp, "tips", None), dict) and name in comp.tips:
+        t = comp.tips[name]
+        return tuple(int(v) for v in t["point"]), np.asarray(t["dir"], dtype=np.float32), float(t["curv"]), t["trace"]
     if name == "l":
         return comp.lt, comp.ld, float(comp.lcurv), comp.ltrace
     return comp.rt, comp.rd, float(comp.rcurv), comp.rtrace
@@ -612,6 +706,25 @@ def _evaluate_tip_pair(
     if curv_delta > max_curv_delta:
         return None
 
+    # Arc extrapolation gate.
+    max_arc_miss_frac = float(thr.get("max_arc_miss_frac", 1.0))
+    if max_arc_miss_frac < 0.99 and dist > 4.0:
+        tips_b = getattr(base, "tips", None) or {}
+        tips_t = getattr(tar, "tips", None) or {}
+        b_extra = tips_b[base_tip_name]["extra"] if base_tip_name in tips_b else (base.lextra if base_tip_name == "l" else base.rextra)
+        t_extra = tips_t[tar_tip_name]["extra"] if tar_tip_name in tips_t else (tar.lextra if tar_tip_name == "l" else tar.rextra)
+        if b_extra is not None and t_extra is not None:
+            bp_xy = np.asarray([float(bp[1]), float(bp[0])], dtype=np.float32)
+            tp_xy = np.asarray([float(tp[1]), float(tp[0])], dtype=np.float32)
+            pred_from_base = _arc_predicted_position(b_extra, dist)
+            pred_from_tar  = _arc_predicted_position(t_extra, dist)
+            arc_miss = 0.5 * (
+                float(np.linalg.norm(pred_from_base - tp_xy))
+                + float(np.linalg.norm(pred_from_tar  - bp_xy))
+            )
+            if arc_miss > max_arc_miss_frac * dist:
+                return None
+
     bridge_pts = _sample_hermite_bridge(
         bp,
         tp,
@@ -740,11 +853,13 @@ def reconnect_components(components: List[Component], cfg: Dict) -> List[Compone
     def _candidate_ids(base: Component, layer_labels: Dict[int, np.ndarray]) -> List[int]:
         cands: set[int] = set()
         lay_ids = [base.layer] if candidate_layers in ("same", "self", "within") else list(layer_labels.keys())
+        # Search from all known tips, not just the farthest pair.
+        tip_points = [t["point"] for t in base.tips.values()] if isinstance(getattr(base, "tips", None), dict) else [base.lt, base.rt]
         for lay in lay_ids:
             lab = layer_labels.get(lay, None)
             if lab is None:
                 continue
-            for tip in (base.lt, base.rt):
+            for tip in tip_points:
                 vals = _sample_labels_in_neighborhood(lab, tip, search_size)
                 for cid in np.unique(vals):
                     cid = int(cid)
@@ -823,12 +938,14 @@ def reconnect_components(components: List[Component], cfg: Dict) -> List[Compone
                 continue
 
             best: Optional[Proposal] = None
+            base_tip_names = list(base.tips.keys()) if isinstance(getattr(base, "tips", None), dict) and base.tips else ["l", "r"]
             for cid in cand_ids:
                 tar = id2comp.get(cid, None)
                 if tar is None or not tar.exist or tar.id == base.id:
                     continue
-                for bt in ("l", "r"):
-                    for tt in ("l", "r"):
+                tar_tip_names = list(tar.tips.keys()) if isinstance(getattr(tar, "tips", None), dict) and tar.tips else ["l", "r"]
+                for bt in base_tip_names:
+                    for tt in tar_tip_names:
                         prop = _evaluate_tip_pair(base, tar, bt, tt, global_label, cfg)
                         if prop is None:
                             continue

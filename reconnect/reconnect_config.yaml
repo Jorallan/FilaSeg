@@ -1,69 +1,102 @@
-io:  # Input/output folders
+io:
   input_dir: 'input'       # folder with input branch masks
   output_dir: 'output'     # folder for outputs
 
+# Written automatically by stringart_tiles.py when run before reconnect.
+# Set manually if running reconnect standalone (null = use config defaults).
+shared:
+  filament_width_px: null
+
 thresholds:
-  # Basic mask cleaning / overlap control
   branch_bin: 0.5                  # binarization threshold for input masks
   min_component_area: 15           # discard very small components before reconnecting
   overlap_kill_thr: 0.70           # reject merges with too much overlap/conflict
-
-  # Candidate harvest
   search_size_px: 40               # local search radius around each endpoint
   candidate_layers: all            # which candidate rings/layers to search; all = unrestricted
+  # Geometric gates — used as-is when stage1/stage2 are not defined
+  max_tip_distance_px: 40
+  min_forward_cos: 0.82
+  min_inward_opposition: 0.50
+  max_width_ratio: 2.75
+  max_line_residual_px: 8
+  max_curvature_delta: 0.16
+  max_bridge_intrusion_frac: 0.20
+  max_smooth_rms_px: 6.0
+  max_turn_deg: 65.0
+  max_arc_miss_frac: 0.65          # arc extrapolation gate (1.0 = disabled); lower = stricter
 
-  # Hard geometric gates
-  max_tip_distance_px: 40          # maximum allowed endpoint-to-endpoint gap
-  min_forward_cos: 0.82            # both endpoints must point sufficiently toward the bridge
-  min_inward_opposition: 0.50      # inward tangents should roughly oppose each other
-  max_width_ratio: 2.75            # reject if bundle widths differ too much
-  max_line_residual_px: 8          # max deviation from extrapolated continuation line
-  max_curvature_delta: 0.16        # max mismatch in local curvature estimate
-  max_bridge_intrusion_frac: 0.20  # reject bridges that pass through unrelated foreground
-  max_smooth_rms_px: 6.0           # max local smooth-fit residual after hypothetical merge
-  max_turn_deg: 65.0               # max turning angle allowed at the connection
+morphology:
+  dilate_px: 1                     # overridden at runtime if filament_width_px is known
+  tip_dir_steps: 18
 
-morphology:  # Low-level geometric estimation
-  dilate_px: 1                     # small dilation used in mask processing / overlap logic
-  tip_dir_steps: 18                # steps used to estimate endpoint direction
+preprocess:
+  clean_min_area: 5
+  skeletonize_components: true
+  split_at_branchpoints: false
+  bp_dilate_px: 2
 
-preprocess:  # Pre-reconnection cleanup / skeleton handling
-  clean_min_area: 5                # remove tiny specks before geometry extraction
-  skeletonize_components: true     # work on component skeletons for endpoint analysis
-  split_at_branchpoints: false     # split components at branchpoints before reconnecting
-  bp_dilate_px: 2                  # branchpoint dilation radius if splitting is enabled
+advanced:
+  trace_steps: 28
+  fit_points: 12
+  smooth_trace_points: 22
+  bridge_samples: 24
+  bridge_tangent_scale: 0.12
+  bridge_clearance_px: 0
+  component_mask_mode: skeletonized  # default v6 mode; matches v5-style thin component masks
+  max_component_tips: 8
+  min_tip_trace_len_px: 3.0
 
-advanced:  # Curve fitting / bridge construction
-  trace_steps: 28                  # inward trace length from each endpoint
-  fit_points: 12                   # number of traced points used for local fitting
-  smooth_trace_points: 22          # trace smoothing support for curvature/smoothness checks
-  bridge_samples: 24               # samples used to rasterize/evaluate the bridge curve
-  bridge_tangent_scale: 0.12       # how strongly endpoint tangents bend the bridge
-  bridge_clearance_px: 0           # safety clearance when checking bridge collisions
-  min_tip_trace_len_px: 3.0        # (v6 only) ignore unstable tips with too little inward support
+weights:
+  distance: 0.50
+  forward: 2.5
+  opposition: 1.3
+  line_residual: 2.8
+  width_ratio: 0.25
+  curvature_delta: 0.55
+  smooth_rms: 2.6
+  smooth_curvature: 1.1
+  bridge_intrusion: 2.0
+  length_reward: 0.01
 
-weights:  # Final candidate scoring weights
-  distance: 0.50                   # penalty weight for endpoint gap
-  forward: 2.5                     # reward/penalty for forward tangent agreement
-  opposition: 1.3                  # reward/penalty for tangent opposition consistency
-  line_residual: 2.8               # penalty for poor line extrapolation agreement
-  width_ratio: 0.25                # penalty for width mismatch
-  curvature_delta: 0.55            # penalty for curvature mismatch
-  smooth_rms: 2.6                  # penalty for poor merged smoothness
-  smooth_curvature: 1.1            # penalty for sharp curvature after merge
-  bridge_intrusion: 2.0            # penalty for bridge crossing other structures
-  length_reward: 0.01              # small reward for merging longer components
+outputs:
+  save_raw_labels: true
+  save_dilated_labels: true
+  save_overlay: true
+  overlay_alpha: 0.3
+  save_label_previews: true
 
-outputs:  # Saved result types
-  save_raw_labels: true            # save raw label image
-  save_dilated_labels: true        # save label image after dilation / display cleanup
-  save_overlay: true               # save overlay visualization
-  overlay_alpha: 0.3               # overlay transparency
-  save_label_previews: true        # save color preview images of labels
+runtime:
+  verbose: true
+  print_every_pass: 1
+  print_every_merge: 10
+  max_merges_per_pass: 100
+  max_passes: 10                   # ignored when stage1/stage2 are defined
 
-runtime:  # Logging / iteration control
-  verbose: true                    # print detailed progress
-  print_every_pass: 1              # print summary every N passes
-  print_every_merge: 10            # print details every N accepted merges
-  max_passes: 10                   # maximum global reconnection passes
-  max_merges_per_pass: 100         # safety cap on merges accepted per pass
+# Two-stage reconnection: stage1 locks in high-confidence merges with strict
+# gates; stage2 then relaxes to recover harder cases on cleaner geometry.
+# Only thresholds that differ from the base values above need to be listed.
+stage1:
+  runtime:
+    max_passes: 4
+  thresholds:
+    max_tip_distance_px: 20
+    min_forward_cos: 0.90
+    min_inward_opposition: 0.60
+    max_turn_deg: 45.0
+    max_line_residual_px: 5
+    max_bridge_intrusion_frac: 0.15
+    max_arc_miss_frac: 0.55        # stricter arc gate in stage 1
+
+stage2:
+  runtime:
+    max_passes: 6
+  thresholds:
+    max_tip_distance_px: 50
+    min_forward_cos: 0.72
+    min_inward_opposition: 0.40
+    max_turn_deg: 75.0
+    max_line_residual_px: 12
+    max_curvature_delta: 0.20
+    max_bridge_intrusion_frac: 0.25
+    max_smooth_rms_px: 5.5         # slightly more tolerant in stage 2 so curved continuations survive
+    max_arc_miss_frac: 0.75        # relax arc extrapolation for circular / bowed continuations

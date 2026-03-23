@@ -59,14 +59,14 @@ import numpy as np
 # ============================================================
 CONFIG: Dict[str, Any] = {
     # --- IO ---
-    "INPUT_PATH":         r"C:\Repos\filaments_quantification\2_stringart\input\cnt_orient_0003_merge.png",
-    "OUTPUT_ROOT":        r"C:\Repos\filaments_quantification\2_stringart\output\cnt_orient_0003_merge",
+    "INPUT_PATH":         r"C:\Repos\filaments_quantification\stringart\input\cnt_orient_0003_merge.png",
+    "OUTPUT_ROOT":        r"C:\Repos\filaments_quantification\stringart\output\cnt_orient_0003_merge",
     "OUTPUT_FOLDER_NAME": None,   # None → timestamp; or set a string like "my_run"
     "BIN_THRESHOLD":      127,
 
     # --- Tiling / binning ---
     "TILE_SIZE":       128,   # tile width/height in px; smaller = more local fits, more seams
-    "ANGLE_STEP_DEG":  8,    # angle-bin width over [0°,180°); smaller = more bins
+    "ANGLE_STEP_DEG":  15,   # angle-bin width over [0°,180°); smaller = more bins
 
     # --- Preprocessing ---
     "USE_SKELETONIZE":    False,  # thin to ~1 px centerlines before Hough
@@ -717,6 +717,11 @@ def main() -> None:
         for b in branches:
             branches_merge = cv2.bitwise_or(branches_merge, b)
         cv2.imwrite(os.path.join(branches_dir, f"{base_stem}_branches_merge.png"), branches_merge)
+        # Width hint for reconnect pipeline — written alongside branches so
+        # reconnect_run.py can auto-scale dilate_px to match filament scale.
+        with open(os.path.join(branches_dir, "filament_width.json"), "w", encoding="utf-8") as _fw:
+            json.dump({"filament_width_px": width_info.get("width_px", 1.0),
+                       "radius_px":         width_info.get("radius_px", 0.5)}, _fw, indent=2)
 
     # --- metrics ---
     wanted    = img_bin_orig

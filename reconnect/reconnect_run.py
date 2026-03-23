@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import importlib
 import json
 import re
@@ -335,6 +336,32 @@ def _save_preview_png(path: Path, lbl: np.ndarray):
     skio.imsave(str(path), vis, check_contrast=False)
 
 
+def _load_width_hint(input_dir: Path) -> float | None:
+    """Read filament_width_px written by stringart_tiles.py into the branches folder."""
+    for p in (input_dir / "filament_width.json", input_dir.parent / "filament_width.json"):
+        if p.exists():
+            try:
+                w = float(json.loads(p.read_text(encoding="utf-8")).get("filament_width_px", 0))
+                return w if w > 0 else None
+            except Exception:
+                pass
+    return None
+
+
+def _make_stage_cfg(base_cfg: dict, stage_key: str) -> dict:
+    """Return a deep copy of base_cfg with stage-specific overrides merged in."""
+    stage = base_cfg.get(stage_key, {})
+    if not stage:
+        return base_cfg
+    cfg = copy.deepcopy(base_cfg)
+    for section, overrides in stage.items():
+        if isinstance(overrides, dict):
+            cfg.setdefault(section, {}).update(overrides)
+        else:
+            cfg[section] = overrides
+    return cfg
+
+
 def _resolve_config_path(config_arg: str) -> Path:
     p = Path(config_arg)
     if p.is_absolute() and p.exists():
@@ -373,6 +400,27 @@ def main():
     output_dir = Path(args.output or io_cfg.get("output_dir", "./output")).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    # Width hint from stringart_tiles — adjusts dilate_px to match filament scale
+    width_hint = _load_width_hint(input_dir)
+    if width_hint is not None:
+        dilate_auto = max(1, round(width_hint * 0.5))
+        cfg.setdefault("morphology", {})["dilate_px"] = dilate_auto
+        print(f"[reconnect-{args.version}] filament_width={width_hint:.2f}px from tiles → dilate_px={dilate_auto}")
+    elif cfg.get("shared", {}).get("filament_width_px"):
+        width_hint = float(cfg["shared"]["filament_width_px"])
+        dilate_auto = max(1, round(width_hint * 0.5))
+        cfg.setdefault("morphology", {})["dilate_px"] = dilate_auto
+        print(f"[reconnect-{args.version}] filament_width={width_hint:.2f}px from config → dilate_px={dilate_auto}")
+
+    # Two-stage setup
+    has_stages = "stage1" in cfg and "stage2" in cfg
+    if has_stages:
+        cfg1 = _make_stage_cfg(cfg, "stage1")
+        cfg2 = _make_stage_cfg(cfg, "stage2")
+        print(f"[reconnect-{args.version}] two-stage: "
+              f"stage1={cfg1['runtime']['max_passes']} passes (strict), "
+              f"stage2={cfg2['runtime']['max_passes']} passes (relaxed)")
+
     print(f"[reconnect-{args.version}] input_dir:", input_dir)
 
     bases = find_basenames(input_dir)
@@ -386,6 +434,8 @@ def main():
     morph = cfg["morphology"]
     outcfg = cfg["outputs"]
     pre = cfg.get("preprocess", {})
+    adv = cfg.get("advanced", {})
+    component_mask_mode = str(adv.get("component_mask_mode", "full")).strip().lower()
 
     for base in bases:
         merged_path = _pick_existing_by_preference(input_dir, f"{base}_branches_merge")
@@ -435,6 +485,7 @@ def main():
                 min_area=int(thr["min_component_area"]),
                 start_id=cid,
                 skeletonize_each=bool(pre.get("skeletonize_components", True)),
+                component_mask_mode=component_mask_mode,
             )
             components.extend(comps)
 
@@ -442,7 +493,13 @@ def main():
             print(f"[reconnect-{args.version}] '{base}': no components after thresholding")
             continue
 
-        components = reconnect_components(components, cfg)
+        if has_stages:
+            print(f"[reconnect-{args.version}] stage 1 (strict)...")
+            components = reconnect_components(components, cfg1)
+            print(f"[reconnect-{args.version}] stage 2 (relaxed)...")
+            components = reconnect_components(components, cfg2)
+        else:
+            components = reconnect_components(components, cfg)
         lbl = relabel_components(components)
         lbl_dil = dilate_label_image(lbl, int(morph["dilate_px"])) if lbl is not None else None
         overlay = make_overlay(bg, lbl_dil if lbl_dil is not None else lbl, float(outcfg["overlay_alpha"]))

@@ -29,8 +29,6 @@ Converts binary filament masks into vector representations using a tile-wise gre
 |------|-------------|
 | `stringart_tiles.py` | Primary script — line-based, with automatic width estimation and parameter scaling |
 | `stringart_tiles_curve.py` | Curve variant — pure quadratic Bézier primitives with multi-stage curvature progression |
-| `stringart_mincurve.py` | Lightweight standalone curve implementation |
-| `stringart_soax.py` | SOAX-based approach |
 
 ### `reconnect/` — Filament reconnection
 
@@ -39,8 +37,8 @@ Reconnects broken filament fragments at gaps and intersections using smooth Béz
 | File | Description |
 |------|-------------|
 | `reconnect_run.py` | Main entry point — select algorithm version via `--version` |
-| `reconnect_utils_v5.py` | Smooth curve bridging with geometric validation gates |
-| `reconnect_utils_v6.py` | v5 + tip stability filtering and improved tip enumeration |
+| `reconnect_utils_v5.py` | Baseline reconnect implementation with smooth bridging and geometric validation |
+| `reconnect_utils_v6.py` | Current default reconnect implementation with improved tip enumeration and stability handling |
 | `reconnect_config.yaml` | Shared configuration for both versions |
 | `reconnect_interactive.py` | Interactive slider-based parameter tuning tool |
 
