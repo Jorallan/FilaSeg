@@ -134,7 +134,7 @@ def _choose_tip_pair(skel: np.ndarray, fallback_mask: np.ndarray) -> Tuple[Coord
 def trace_from_tip(skel: np.ndarray, tip: Coord, max_steps: int) -> np.ndarray:
     """
     Ordered tip trace: [tip, ..., inward]. Stops at branch / dead-end / max_steps.
-    This is intentionally local; for gating we only need the first part of the centerline.
+    Only the local centerline segment near the tip is traced for gating.
     """
     if not (0 <= tip[0] < skel.shape[0] and 0 <= tip[1] < skel.shape[1]):
         return np.asarray([[0.0, 0.0]], dtype=np.float32)
@@ -877,11 +877,9 @@ def _evaluate_tip_pair(
     if curv_delta > max_curv_delta:
         return None
 
-    # Arc extrapolation gate: predict where each tip's curve would land if it
-    # continued outward by `dist` pixels. If the predicted landing is farther
-    # than max_arc_miss_frac * dist from the partner tip, this is not a smooth
-    # geometric continuation — reject. Works for both straight and curved filaments;
-    # beneficial mainly for the curved case where tangent direction alone misleads.
+    # Arc extrapolation gate: extend each tip outward by `dist` pixels and
+    # reject the pair when the predicted landing misses the partner tip by
+    # more than max_arc_miss_frac * dist.
     max_arc_miss_frac = float(thr.get("max_arc_miss_frac", 1.0))  # 1.0 = disabled
     if max_arc_miss_frac < 0.99 and dist > 4.0:
         b_extra = (base.tips or {}).get(base_tip_name, {}).get("extra", None)
@@ -1107,8 +1105,7 @@ def reconnect_components(components: List[Component], cfg: Dict) -> List[Compone
             break
 
         layer_labels = _build_layer_labels()
-        # Use thin skeleton centerlines for bridge intrusion across v6 modes.
-        # This keeps nearby thick masks from falsely blocking short, clean joins.
+        # Evaluate bridge intrusion against thin centerlines.
         global_label = _component_union_label(alive, use_skeleton=True)
         id2comp = _id2comp()
 

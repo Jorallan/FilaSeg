@@ -38,7 +38,7 @@ Reconnects broken filament fragments at gaps and intersections using smooth Béz
 |------|-------------|
 | `reconnect_run.py` | Main entry point — select algorithm version via `--version` |
 | `reconnect_utils_v5.py` | Baseline reconnect implementation with smooth bridging and geometric validation |
-| `reconnect_utils_v6.py` | Current default reconnect implementation with improved tip enumeration and stability handling |
+| `reconnect_utils_v6.py` | Reconnect implementation with improved tip enumeration and stability handling |
 | `reconnect_config.yaml` | Shared configuration for both versions |
 | `reconnect_interactive.py` | Interactive slider-based parameter tuning tool |
 
@@ -48,7 +48,7 @@ Reconnects broken filament fragments at gaps and intersections using smooth Béz
 # Run with default (v6)
 python reconnect/reconnect_run.py --config reconnect/reconnect_config.yaml
 
-# Run v5 for comparison
+# Run with v5
 python reconnect/reconnect_run.py --version v5
 
 # Override input/output paths

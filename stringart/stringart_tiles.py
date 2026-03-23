@@ -1,49 +1,22 @@
-# stringart_tilesV6.py
+# stringart_tiles.py
 """
 Tile-wise greedy line reconstruction ("string art"-style) for binary filament masks.
 
 Core idea per tile:
-  - (optional) skeletonize
-  - residual = target
-  - for each angle bin:
-      repeat:
-        run HoughLinesP on (optionally dilated) residual
-        keep only candidates in current angle bin
-        sort by length
-        accept first candidate covering >= MIN_ACCEPT_NEWPIX residual pixels
-        subtract accepted line from residual; add to recon + branch
-        stop when no acceptable candidate, residual empty, or MAX_LINES_PER_TILE hit
+  - optionally skeletonize the mask
+  - track the remaining residual pixels
+  - process candidate lines one angle bin at a time
+  - accept candidates that explain enough new residual pixels
+  - subtract accepted lines and write per-branch outputs
 
-Outputs:  original.png, reconstructed.png, overlay.png (opt),
-          branches/<base>_branch_i.png + merge, run_config.json
+Outputs: original.png, reconstructed.png, overlay.png,
+         branches/<base>_branch_i.png + merge, run_config.json
 
-============================  CHANGES VS V3  ====================================
-1. AUTO_SCALE_PARAMS (new): estimates filament width via distance transform and
-   autoscales exactly 4 Hough/accept params (HOUGH_THRESHOLD, HOUGH_MIN_LINE_LENGTH,
-   HOUGH_MAX_LINE_GAP, MIN_ACCEPT_NEWPIX) anchored at width=2 px.
-   DRAW_THICKNESS stays manual/fixed throughout.
-
-2. Runtime params dict: all tunable values now flow through a `runtime_params`
-   dict passed down the call stack instead of mutating global CONFIG.
-   This replaces V3's fragile save/restore hack in auto_tune_params.
-
-3. AUTO_MULTI_THICKNESS_TRY (new): optionally tests a small neighbourhood of
-   thickness values per candidate line and picks the one with the best pixel
-   overlap (DRAW_THICKNESS itself stays fixed as the base).
-
-4. Auto-tune now tunes ONLY the 4 autoscaled params (not RESIDUAL_DILATE_KERNEL),
-   widens threshold search to ±3 (was ±2), and seeds from autoscaled values when
-   AUTO_SCALE_PARAMS is also on.
-
-5. draw_line_mask: guards thickness against zero with max(1, thickness).
-
-6. Thinning: uses cv2.ximgproc.thinning (GPU-free C++) when available; falls
-   back to the original pure-Python Zhang-Suen only if the contrib module is
-   missing. This is a significant speed-up for large tiles.
-
-7. Code: duplicate boilerplate condensed, helpers unified, minor default fixes
-   (RESIDUAL_DILATE_ITERS fallback unified to 1; HOUGH_THRESHOLD baseline 24).
-=================================================================================
+Additional features:
+  - automatic width-based scaling for Hough and acceptance thresholds
+  - runtime parameter bundles for auto-tuning
+  - optional local thickness search around candidate lines
+  - OpenCV thinning when available, with a Zhang-Suen fallback
 """
 
 from __future__ import annotations

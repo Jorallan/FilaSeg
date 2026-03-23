@@ -42,7 +42,7 @@ advanced:
   bridge_samples: 24
   bridge_tangent_scale: 0.12
   bridge_clearance_px: 0
-  component_mask_mode: skeletonized  # default v6 mode; matches v5-style thin component masks
+  component_mask_mode: skeletonized  # store extracted component masks as thin centerlines
   max_component_tips: 8
   min_tip_trace_len_px: 3.0
 

@@ -134,7 +134,7 @@ def _choose_tip_pair(skel: np.ndarray, fallback_mask: np.ndarray) -> Tuple[Coord
 def trace_from_tip(skel: np.ndarray, tip: Coord, max_steps: int) -> np.ndarray:
     """
     Ordered tip trace: [tip, ..., inward]. Stops at branch / dead-end / max_steps.
-    This is intentionally local; for gating we only need the first part of the centerline.
+    Only the local centerline segment near the tip is traced for gating.
     """
     if not (0 <= tip[0] < skel.shape[0] and 0 <= tip[1] < skel.shape[1]):
         return np.asarray([[0.0, 0.0]], dtype=np.float32)

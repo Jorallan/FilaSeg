@@ -1,21 +1,14 @@
-# stringart_tiles.py
+# stringart_tiles_curve.py
 """
-Tile-wise greedy reconstruction ("string art"-style) for binary filament masks
-using ONLY a quadratic curve primitive (Bezier curve), reconstructed in stages
-of increasing curvature.
+Tile-wise greedy reconstruction for binary filament masks using quadratic
+Bezier curves only.
 
-Key changes vs the original:
-1) No line primitive drawing path (everything is a quadratic curve).
-2) Stage-based fitting:
-   - Stage 1: near-straight curves (bend ~ 0)
-   - Stage 2..N: progressively higher bend
-   - Final stages: high bend (approaches arc-like / circular-looking local fits)
-3) Stages can be user-defined or auto-generated.
+Fitting proceeds in user-defined or auto-generated curvature stages, starting
+from near-straight segments and expanding toward higher bend values.
 
-Notes:
-- Candidate generation still uses HoughLinesP to propose chord endpoints (p0,p2).
-- Actual drawing is ALWAYS a quadratic curve p0 -> p1 -> p2.
-- "Circular" here is approximate (quadratic Bezier cannot represent a perfect circle).
+Candidate generation still uses HoughLinesP to propose chord endpoints
+(p0, p2), while accepted primitives are always drawn as p0 -> p1 -> p2
+quadratic curves.
 """
 
 from __future__ import annotations
