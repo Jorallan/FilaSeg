@@ -20,6 +20,7 @@ Additional features:
 """
 
 from __future__ import annotations
+import argparse
 import os, json, math, time
 from typing import List, Tuple, Optional, Dict, Any
 
@@ -107,7 +108,66 @@ CONFIG: Dict[str, Any] = {
     # (DRAW_THICKNESS itself remains the manual base, not tuned)
     "AUTO_MULTI_THICKNESS_TRY":   True,
     "AUTO_MULTI_THICKNESS_DELTA": 1,
+
+    # --- Experiment comparison grid ---
+    # Set to a list of (label, config_override_dict) to compare multiple runs.
+    # When non-empty, main() prints a quality table before the normal run.
+    # Example:
+    #   "EXPERIMENT_GRID": [
+    #       ("baseline",     {}),
+    #       ("gap-10",       {"HOUGH_MAX_LINE_GAP": 10}),
+    #       ("gap-15",       {"HOUGH_MAX_LINE_GAP": 15}),
+    #       ("no-skel",      {"USE_SKELETONIZE": False}),
+    #       ("thin-1px",     {"DRAW_THICKNESS": 1}),
+    #   ],
+    "EXPERIMENT_GRID": [],
 }
+
+
+# ============================================================
+# CLI overrides, while keeping CONFIG as the user-editable default
+# ============================================================
+
+def parse_args() -> argparse.Namespace:
+    ap = argparse.ArgumentParser(description="Tile-wise stringart vectorization for binary filament masks.")
+    ap.add_argument("--input", type=str, default=None, help="Override CONFIG['INPUT_PATH'].")
+    ap.add_argument("--output-root", type=str, default=None, help="Override CONFIG['OUTPUT_ROOT'].")
+    ap.add_argument("--output-folder-name", type=str, default=None, help="Named run folder under output root.")
+    ap.add_argument("--bin-threshold", type=int, default=None)
+    ap.add_argument("--tile-size", type=int, default=None)
+    ap.add_argument("--angle-step-deg", type=int, default=None)
+    ap.add_argument("--draw-thickness", type=int, default=None)
+    ap.add_argument("--hough-threshold", type=int, default=None)
+    ap.add_argument("--hough-min-line-length", type=int, default=None)
+    ap.add_argument("--hough-max-line-gap", type=int, default=None)
+    ap.add_argument("--min-accept-newpix", type=int, default=None)
+    ap.add_argument("--use-skeletonize", action="store_true", default=None)
+    ap.add_argument("--no-skeletonize", action="store_false", dest="use_skeletonize")
+    ap.add_argument("--auto-scale", action="store_true", default=None)
+    ap.add_argument("--no-auto-scale", action="store_false", dest="auto_scale")
+    return ap.parse_args()
+
+
+def apply_cli_overrides(args: argparse.Namespace) -> None:
+    mapping = {
+        "input": "INPUT_PATH",
+        "output_root": "OUTPUT_ROOT",
+        "output_folder_name": "OUTPUT_FOLDER_NAME",
+        "bin_threshold": "BIN_THRESHOLD",
+        "tile_size": "TILE_SIZE",
+        "angle_step_deg": "ANGLE_STEP_DEG",
+        "draw_thickness": "DRAW_THICKNESS",
+        "hough_threshold": "HOUGH_THRESHOLD",
+        "hough_min_line_length": "HOUGH_MIN_LINE_LENGTH",
+        "hough_max_line_gap": "HOUGH_MAX_LINE_GAP",
+        "min_accept_newpix": "MIN_ACCEPT_NEWPIX",
+        "use_skeletonize": "USE_SKELETONIZE",
+        "auto_scale": "AUTO_SCALE_PARAMS",
+    }
+    for arg_name, cfg_name in mapping.items():
+        val = getattr(args, arg_name)
+        if val is not None:
+            CONFIG[cfg_name] = val
 
 
 # ============================================================
@@ -584,10 +644,117 @@ def auto_tune_params(
 
 
 # ============================================================
+# Run quality metrics + experiment grid
+# ============================================================
+
+def compute_run_quality(
+    original_bin255: np.ndarray,
+    recon255: np.ndarray,
+    recon_thin255: np.ndarray,
+) -> dict:
+    """Compute precision/recall/F1/noise metrics for one reconstruction."""
+    wanted_px  = max(1, int(cv2.countNonZero(original_bin255)))
+    thin_px    = max(1, int(cv2.countNonZero(recon_thin255)))
+    hit_thick  = int(cv2.countNonZero(cv2.bitwise_and(recon255,      original_bin255)))
+    hit_thin   = int(cv2.countNonZero(cv2.bitwise_and(recon_thin255, original_bin255)))
+    noise_thin = int(cv2.countNonZero(cv2.bitwise_and(recon_thin255, cv2.bitwise_not(original_bin255))))
+    recall    = hit_thick / wanted_px
+    precision = hit_thin  / thin_px
+    f1 = 2.0 * precision * recall / (precision + recall + 1e-9)
+    noise_frac = noise_thin / thin_px
+    return {
+        "recall":     round(recall,    4),
+        "precision":  round(precision, 4),
+        "f1":         round(f1,        4),
+        "noise_frac": round(noise_frac,4),
+        "wanted_px":  wanted_px,
+        "hit_thick":  hit_thick,
+        "hit_thin":   hit_thin,
+        "noise_thin": noise_thin,
+        "thin_px":    thin_px,
+    }
+
+
+def run_experiment_set(
+    experiments: List[Tuple[str, Dict[str, Any]]],
+    img_bin_orig: np.ndarray,
+) -> None:
+    """
+    Run the full pipeline for each (label, config_overrides) pair and print
+    a side-by-side quality table so you can compare parameter choices.
+
+    Metrics:
+      Recall     — fraction of original pixels covered by thick reconstruction
+      Precision  — fraction of thin-recon pixels that land on original mask
+      F1         — harmonic mean of the two
+      Noise%     — thin-recon pixels outside original mask (lower is better)
+    """
+    if not experiments:
+        return
+
+    print("\n" + "=" * 76)
+    print("  EXPERIMENT COMPARISON GRID")
+    print("=" * 76)
+    print(f"  {'Label':<22} {'Recall':>8} {'Prec':>8} {'F1':>8} {'Noise%':>8} {'ThinPx':>8}")
+    print("-" * 76)
+
+    rows = []
+    for label, overrides in experiments:
+        saved = {k: CONFIG[k] for k in overrides if k in CONFIG}
+        CONFIG.update(overrides)
+        try:
+            img_algo = img_bin_orig.copy()
+            blobs_exp = None
+            if CONFIG.get("REMOVE_INTERSECTIONS", False):
+                img_algo, blobs_exp = remove_intersection_blobs(
+                    img_algo,
+                    kernel_sz=int(CONFIG.get("INTERSECTION_KERNEL", 3)),
+                    iters=int(CONFIG.get("INTERSECTION_ITERS", 1)),
+                    expand_px=int(CONFIG.get("INTERSECTION_BLOB_EXPAND_PX", 0)),
+                )
+            rp: Dict[str, Any] = {
+                "DRAW_THICKNESS":         int(CONFIG["DRAW_THICKNESS"]),
+                "RESIDUAL_DILATE_KERNEL": int(CONFIG.get("RESIDUAL_DILATE_KERNEL", 0)),
+                "RESIDUAL_DILATE_ITERS":  int(CONFIG.get("RESIDUAL_DILATE_ITERS",  1)),
+                "HOUGH_THRESHOLD":        int(CONFIG["HOUGH_THRESHOLD"]),
+                "HOUGH_MIN_LINE_LENGTH":  int(CONFIG["HOUGH_MIN_LINE_LENGTH"]),
+                "HOUGH_MAX_LINE_GAP":     int(CONFIG["HOUGH_MAX_LINE_GAP"]),
+                "MIN_ACCEPT_NEWPIX":      int(CONFIG["MIN_ACCEPT_NEWPIX"]),
+            }
+            if CONFIG.get("AUTO_SCALE_PARAMS", False):
+                wi = estimate_filament_width_px(
+                    img_algo,
+                    sample_max=int(CONFIG.get("AUTO_SCALE_SAMPLE_MAX", 200_000)),
+                    pct=float(CONFIG.get("AUTO_SCALE_PERCENTILE", 60)),
+                )
+                rp.update(autoscale_4_params(CONFIG, wi["width_px"]))
+            recon, recon_thin, _, _, _ = process_image_tiled(img_algo, rp)
+            if blobs_exp is not None:
+                nb = cv2.bitwise_not(blobs_exp)
+                recon      = cv2.bitwise_and(recon,      nb)
+                recon_thin = cv2.bitwise_and(recon_thin, nb)
+            m = compute_run_quality(img_bin_orig, recon, recon_thin)
+            rows.append((label, m))
+            print(
+                f"  {label:<22} {m['recall']:>8.4f} {m['precision']:>8.4f} {m['f1']:>8.4f} "
+                f"{m['noise_frac']*100:>7.2f}% {m['thin_px']:>8d}"
+            )
+        finally:
+            CONFIG.update(saved)
+
+    print("=" * 76)
+    if rows:
+        best = max(rows, key=lambda r: r[1]["f1"])
+        print(f"  Best F1 → {best[0]}  ({best[1]['f1']:.4f})")
+    print()
+
+
+# ============================================================
 # Main
 # ============================================================
 
 def main() -> None:
+    apply_cli_overrides(parse_args())
     img          = read_gray(CONFIG["INPUT_PATH"])
     img_bin_orig = bool255(binarize(img, CONFIG["BIN_THRESHOLD"]))
     img_bin      = img_bin_orig.copy()
@@ -622,12 +789,12 @@ def main() -> None:
         )
         runtime_params.update(autoscale_4_params(CONFIG, width_info["width_px"]))
         wp, rp_, s = width_info["width_px"], width_info["radius_px"], width_info["n_samples"]
-        print(f"[AUTO_SCALE] width≈{wp:.3f}px  radius≈{rp_:.3f}px  samples={s}")
-        print(f"[AUTO_SCALE] autoscaled → thr={runtime_params['HOUGH_THRESHOLD']}  "
+        print(f"[AUTO_SCALE] width~{wp:.3f}px  radius~{rp_:.3f}px  samples={s}")
+        print(f"[AUTO_SCALE] autoscaled -> thr={runtime_params['HOUGH_THRESHOLD']}  "
               f"minlen={runtime_params['HOUGH_MIN_LINE_LENGTH']}  "
               f"gap={runtime_params['HOUGH_MAX_LINE_GAP']}  "
               f"min_newpix={runtime_params['MIN_ACCEPT_NEWPIX']}")
-        print(f"[AUTO_SCALE] manual     → thickness={runtime_params['DRAW_THICKNESS']}  "
+        print(f"[AUTO_SCALE] manual     -> thickness={runtime_params['DRAW_THICKNESS']}  "
               f"dil_k={runtime_params['RESIDUAL_DILATE_KERNEL']}  "
               f"dil_i={runtime_params['RESIDUAL_DILATE_ITERS']}")
 
@@ -636,7 +803,7 @@ def main() -> None:
         best = auto_tune_params(img_bin, img_bin_orig, runtime_seed_params=runtime_params)
         if best:
             runtime_params = {k: v for k, v in best.items() if not str(k).startswith("_")}
-            print(f"[TUNE] → thr={runtime_params['HOUGH_THRESHOLD']}  "
+            print(f"[TUNE] -> thr={runtime_params['HOUGH_THRESHOLD']}  "
                   f"minlen={runtime_params['HOUGH_MIN_LINE_LENGTH']}  "
                   f"gap={runtime_params['HOUGH_MAX_LINE_GAP']}  "
                   f"min_newpix={runtime_params['MIN_ACCEPT_NEWPIX']}  "
@@ -645,6 +812,10 @@ def main() -> None:
                   f"cov={best['_tune_cov_thick']:.6g}  "
                   f"noise={best['_tune_noise_frac']:.6g}  "
                   f"prec={best['_tune_prec_thin']:.6g}")
+
+    # --- optional experiment comparison grid ---
+    if CONFIG.get("EXPERIMENT_GRID"):
+        run_experiment_set(CONFIG["EXPERIMENT_GRID"], img_bin_orig)
 
     # --- output folder ---
     folder_name = (CONFIG.get("OUTPUT_FOLDER_NAME") or "").strip()
@@ -693,8 +864,9 @@ def main() -> None:
         # Width hint for reconnect pipeline — written alongside branches so
         # reconnect_run.py can auto-scale dilate_px to match filament scale.
         with open(os.path.join(branches_dir, "filament_width.json"), "w", encoding="utf-8") as _fw:
-            json.dump({"filament_width_px": width_info.get("width_px", 1.0),
-                       "radius_px":         width_info.get("radius_px", 0.5)}, _fw, indent=2)
+            wi = width_info or {"width_px": 1.0, "radius_px": 0.5}
+            json.dump({"filament_width_px": wi.get("width_px", 1.0),
+                       "radius_px":         wi.get("radius_px", 0.5)}, _fw, indent=2)
 
     # --- metrics ---
     wanted    = img_bin_orig
@@ -728,8 +900,8 @@ def main() -> None:
     with open(os.path.join(run_dir, "run_config.json"), "w", encoding="utf-8") as f:
         json.dump(cfg_out, f, indent=2)
 
-    print(f"\n[OK] → {run_dir}")
-    print(f"     bins={len(bins)} (step={CONFIG['ANGLE_STEP_DEG']}°)  "
+    print(f"\n[OK] -> {run_dir}")
+    print(f"     bins={len(bins)} (step={CONFIG['ANGLE_STEP_DEG']} deg)  "
           f"wanted={wanted_px}px  thin_recon={thin_px}px")
     print(f"     noise/thin={noise_thin/thin_px:.6g}  hit/thin={prec_thin:.6g}  "
           f"coverage_thick={cov_thick:.6g}")
@@ -737,7 +909,7 @@ def main() -> None:
           f"rm_intersections={CONFIG.get('REMOVE_INTERSECTIONS', False)}  "
           f"thickness(manual)={runtime_params.get('DRAW_THICKNESS')}")
     if width_info is not None:
-        print(f"     filament_width≈{width_info['width_px']:.3f}px  →  "
+        print(f"     filament_width~{width_info['width_px']:.3f}px  ->  "
               f"thr={runtime_params['HOUGH_THRESHOLD']}  "
               f"minlen={runtime_params['HOUGH_MIN_LINE_LENGTH']}  "
               f"gap={runtime_params['HOUGH_MAX_LINE_GAP']}  "

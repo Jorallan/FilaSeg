@@ -222,6 +222,12 @@ def parse_args():
         default=1.60,
         help="Brightness multiplier for selected instance.",
     )
+    ap.add_argument(
+        "--label",
+        type=str,
+        default=None,
+        help="Short label shown in window title. Defaults to last two folder components.",
+    )
     return ap.parse_args()
 
 
@@ -232,6 +238,7 @@ def main():
     if not folder.exists():
         raise FileNotFoundError(f"Input folder does not exist: {folder}")
 
+    version_label = args.label or "/".join(folder.parts[-2:])
     base = find_best_base(folder, args.base)
     if args.base is not None and base is None:
         raise FileNotFoundError(f"Could not find a matching base for pattern: {args.base}")
@@ -258,7 +265,7 @@ def main():
     current_dim_bg = float(args.dim_bg)
     current_brighten_gain = float(args.brighten_gain)
 
-    fig = plt.figure(figsize=(13, 8))
+    fig = plt.figure(figsize=(13, 8), num=f"[{version_label}] {base}")
     gs = fig.add_gridspec(12, 1)
     ax = fig.add_subplot(gs[:10, 0])
     ax_dim = fig.add_subplot(gs[10, 0])
@@ -275,7 +282,7 @@ def main():
         outline_on=show_outline,
     )
     im = ax.imshow(shown, interpolation="nearest")
-    ax.set_title(f"{base}  |  hover: preview, left click: lock, right click: clear")
+    ax.set_title(f"[{version_label}]  {base}  |  hover: preview, left click: lock, right click: clear")
     ax.set_axis_off()
 
     info_text = ax.text(

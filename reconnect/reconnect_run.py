@@ -28,12 +28,13 @@ def parse_args():
     ap.add_argument(
         "--version",
         type=str,
-        choices=["v5", "v6"],
+        choices=["v5", "v6", "v7"],
         default="v6",
         help="Which utils version to use (v5 or v6).",
     )
     ap.add_argument("--input", type=str, default=None, help="override input_dir")
     ap.add_argument("--output", type=str, default=None, help="override output_dir")
+    ap.add_argument("--background", type=str, default=None, help="optional image used for final overlay background")
     ap.add_argument("--pattern", type=str, default=None, help="process only bases matching this substring")
     ap.add_argument("--compare", action="store_true", help="If set, compare extracted stats to GT json and plot.")
     ap.add_argument("--no_show", action="store_true", help="If set, do not show plots (still saves + prints).")
@@ -97,6 +98,17 @@ def _load_gt_json_for_base(input_dir: Path, base: str) -> dict | None:
                 d = json.load(f)
             return d["full"] if isinstance(d, dict) and "full" in d else d
     return None
+
+
+def _read_background_any(path: Path) -> np.ndarray:
+    img = skio.imread(str(path))
+    if img.ndim == 3:
+        img = img[..., :3]
+    img = img.astype(np.float32)
+    mx = float(img.max()) if img.size else 1.0
+    if mx > 1.5:
+        img /= 255.0 if mx <= 255.0 else mx
+    return np.clip(img, 0.0, 1.0)
 
 
 def _component_endpoints_from_skeleton(sk: np.ndarray) -> list[tuple[int, int]]:
@@ -359,6 +371,7 @@ def _make_stage_cfg(base_cfg: dict, stage_key: str) -> dict:
             cfg.setdefault(section, {}).update(overrides)
         else:
             cfg[section] = overrides
+    cfg.setdefault("debug", {})["stage_label"] = stage_key
     return cfg
 
 
@@ -405,12 +418,12 @@ def main():
     if width_hint is not None:
         dilate_auto = max(1, round(width_hint * 0.5))
         cfg.setdefault("morphology", {})["dilate_px"] = dilate_auto
-        print(f"[reconnect-{args.version}] filament_width={width_hint:.2f}px from tiles → dilate_px={dilate_auto}")
+        print(f"[reconnect-{args.version}] filament_width={width_hint:.2f}px from tiles -> dilate_px={dilate_auto}")
     elif cfg.get("shared", {}).get("filament_width_px"):
         width_hint = float(cfg["shared"]["filament_width_px"])
         dilate_auto = max(1, round(width_hint * 0.5))
         cfg.setdefault("morphology", {})["dilate_px"] = dilate_auto
-        print(f"[reconnect-{args.version}] filament_width={width_hint:.2f}px from config → dilate_px={dilate_auto}")
+        print(f"[reconnect-{args.version}] filament_width={width_hint:.2f}px from config -> dilate_px={dilate_auto}")
 
     # Two-stage setup
     has_stages = "stage1" in cfg and "stage2" in cfg
@@ -446,8 +459,11 @@ def main():
 
         orig_path = _pick_existing_by_preference(input_dir, f"{base}_original")
         print(f"[reconnect-{args.version}] processing: {base}  (branches found: {len(branch_paths)})")
+        branch_shape = read_gray_any(branch_paths[0]).shape[:2]
 
-        if orig_path is not None:
+        if args.background:
+            bg = _read_background_any(Path(args.background).resolve())
+        elif orig_path is not None:
             bg = read_gray_any(orig_path)
         elif merged_path is not None:
             bg = read_gray_any(merged_path)
@@ -457,6 +473,12 @@ def main():
                 img = read_gray_any(bp)
                 acc = img if acc is None else np.maximum(acc, img)
             bg = acc if acc is not None else np.zeros((1, 1), dtype=np.float32)
+
+        if bg.shape[:2] != branch_shape:
+            raise ValueError(
+                f"Background shape {bg.shape[:2]} does not match branch shape "
+                f"{branch_shape}"
+            )
 
         merged_bp = None
         if bool(pre.get("split_at_branchpoints", False)):
