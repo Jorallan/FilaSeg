@@ -25,8 +25,8 @@ import numpy as np
 
 CONFIG: Dict[str, Any] = {
     # IO
-    "INPUT_PATH": r"C:\Repos\filaments_quantification\2_stringart\input\experiment1.png",
-    "OUTPUT_ROOT": r"C:\Repos\filaments_quantification\2_stringart\output",
+    "INPUT_PATH": r"C:\Repos\filaments_quantification\1.stringart\input\experiment1.png",
+    "OUTPUT_ROOT": r"C:\Repos\filaments_quantification\1.stringart\output",
     "BIN_THRESHOLD": 127,
     "OUTPUT_FOLDER_NAME": "",  # optional custom output folder; if exists, timestamp suffix is added
 

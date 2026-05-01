@@ -28,9 +28,9 @@ def parse_args():
     ap.add_argument(
         "--version",
         type=str,
-        choices=["v5", "v6", "v7"],
-        default="v6",
-        help="Which utils version to use (v5 or v6).",
+        choices=["straight", "curvy"],
+        default="straight",
+        help="Which evaluator to use: straight (standard) or curvy (arc-aware).",
     )
     ap.add_argument("--input", type=str, default=None, help="override input_dir")
     ap.add_argument("--output", type=str, default=None, help="override output_dir")
@@ -394,19 +394,30 @@ def main():
     args = parse_args()
 
     utils = importlib.import_module(f"reconnect_utils_{args.version}")
-    read_gray_any = utils.read_gray_any
-    binarize_mask = utils.binarize_mask
-    extract_components = utils.extract_components
-    clean_binary_mask = utils.clean_binary_mask
-    branchpoints_8 = utils.branchpoints_8
+    read_gray_any          = utils.read_gray_any
+    binarize_mask          = utils.binarize_mask
+    extract_components     = utils.extract_components
+    clean_binary_mask      = utils.clean_binary_mask
+    branchpoints_8         = utils.branchpoints_8
     remove_branchpoint_regions = utils.remove_branchpoint_regions
-    reconnect_components = utils.reconnect_components
-    relabel_components = utils.relabel_components
-    dilate_label_image = utils.dilate_label_image
-    make_overlay = utils.make_overlay
+    reconnect_components   = utils.reconnect_components
+    relabel_components     = utils.relabel_components
+    dilate_label_image     = utils.dilate_label_image
+    make_overlay           = utils.make_overlay
 
     cfg_path = _resolve_config_path(args.config)
     cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+
+    # Merge curvy-mode overrides from the [curvy] section of the config.
+    if args.version == "curvy" and "curvy" in cfg:
+        curvy_overrides = cfg.pop("curvy")
+        for key, val in curvy_overrides.items():
+            if isinstance(val, dict) and isinstance(cfg.get(key), dict):
+                cfg[key] = {**cfg[key], **val}
+            else:
+                cfg[key] = val
+    else:
+        cfg.pop("curvy", None)
 
     io_cfg = cfg.get("io", {})
     input_dir = Path(args.input or io_cfg.get("input_dir", "./input")).resolve()

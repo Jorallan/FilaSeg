@@ -1,158 +1,178 @@
-# filaments_quantification — Repo Summary
+# filaments_quantification - Repo Summary
 
 ## Purpose
 
-Two-stage pipeline for quantifying filaments (e.g. CNTs) in microscopy images:
+This repository is being shaped into a CNT bundle extraction pipeline:
 
-1. **stringart** — vectorize a binary filament mask into oriented line segments ("branches") using a tile-wise greedy Hough approach.
-2. **reconnect** — stitch the resulting branch fragments back into whole filaments using geometry- and curvature-aware scoring.
+1. Start with a binary SEM/UNet mask and a greyscale or overlay image.
+2. Use `1.stringart` to convert the mask into branch-like primitives.
+3. Use `2.preprocess` to remove obvious branch artifacts before reconnect.
+4. Use `3.reconnect` v7 to merge branch fragments into candidate bundles.
+5. Use `4.postprocess` to smooth and slightly thicken bundle labels.
+6. Export overlays, colored instance labels, and a DEM-oriented JSON bundle file.
 
----
+## Current Layout
 
-## Repository layout
+```text
+Tools/
+  crop_pair_interactive.py      Matplotlib paired cropper for aligned mask/overlay images.
+  run_full_sem_pipeline.py      End-to-end runner for the current SEM bundle workflow.
+  mask_edit.py                  Legacy OpenCV mask editing utility.
 
-```
-stringart/
-  stringart_tiles.py          greedy Hough vectorizer (CONFIG dict at top)
-  stringart_tiles_curve.py    variant with curve-fitting output
+1.stringart/
+  stringart_tiles.py            Primary line-based vectorizer.
+  stringart_tiles_curve.py      Curve primitive experiment.
 
-reconnect/
-  reconnect_utils_v5.py       first Python port of the MATLAB reconnector
-  reconnect_utils_v6.py       production evaluator (straight-line gates)
-  reconnect_utils_v7.py       curvy-filament evaluator (monkey-patches v6)
-  reconnect_config.yaml       default config (used by v5/v6)
-  reconnect_config_v7.yaml    v7 config (two-stage, curvature-adaptive)
-  reconnect_run.py            CLI entry point — --version v5/v6/v7
-  input/                      per-image branch PNGs + merge TIFs
-  output/                     label TIFs, previews, overlays
-```
+2.preprocess/
+  preprocess_stringart_branches.py
+                                Branch cleanup between stringart and reconnect.
 
----
+3.reconnect/
+  reconnect_run.py              Main reconnect CLI.
+  reconnect_interactive.py      Interactive viewer/tuner for reconnect-style outputs.
+  reconnect_debug.py            Inspection and rejection-log helper.
+  reconnect_utils_straight.py   Standard straight-line evaluator.
+  reconnect_utils_curvy.py      Arc-aware evaluator for curved filaments (CNT default).
+  reconnect_config.yaml         Unified config; [curvy] section holds curvy-only keys.
 
-## Module responsibilities
+4.postprocess/
+  post_process_reconnect.py     Smooths/thickens reconnect labels and writes previews.
 
-### stringart_tiles.py
-- Reads a binary mask, optionally skeletonizes it.
-- Tiles the image (`TILE_SIZE`, default 128 px), runs `HoughLinesP` per tile per angle bin.
-- Greedy acceptance: keeps lines that explain ≥ `MIN_ACCEPT_NEWPIX` new residual pixels.
-- Outputs one PNG per line-bundle ("branch"), a merged PNG, and a `run_config.json`.
-- Width-based autoscaling of Hough / acceptance thresholds.
-- Optional experiment grid (`CONFIG["EXPERIMENT_GRID"]`) that runs parameter sweeps and prints a recall/precision/F1 table.
-
-### reconnect_run.py
-- Dynamically imports the requested utils version.
-- Reads per-branch PNGs, binarizes, cleans, extracts components, skeletonizes.
-- Optionally splits at branchpoints before reconnection.
-- Supports **two-stage** reconnection when `stage1` / `stage2` keys are present in the config (strict first pass, relaxed second).
-- Saves: raw label TIF, dilated label TIF, label previews, overlay PNG.
-- `--compare` mode: compares extracted stats (filament count, arc length, angle, tortuosity) against a GT JSON and saves a 3-panel plot.
-
-### reconnect_utils_v6.py
-- Core reconnector: extracts tip geometry, traces along the skeleton, evaluates candidate tip-pairs with straight-line angular and residual gates, ranks by composite score, runs greedy merge passes.
-- Key gate sequence: distance → forward cos → inward opposition → width ratio → **line residual** → curvature delta → Hermite bridge intrusion → smoothness RMS → turn angle.
-- Arc prediction (`_arc_predicted_position`) was computed but came *after* all the hard gates, so curved pairs were already rejected before it ran.
-
-### reconnect_utils_v7.py (changes vs v6)
-See the next section.
-
-### Debug script (reconnect/)
-
-**[reconnect_debug.py](reconnect/reconnect_debug.py)** — single CLI with three subcommands:
-
-```bash
-# Print area, bbox, tips, axis angle for label ids
-python reconnect_debug.py inspect v7/labels.tif "10,7,3"
-
-# Find rejection-log rows by tip coordinates (tol defaults to 4 px)
-python reconnect_debug.py grep-log output/reconnect_rejection_log.csv 178 132 175 126 5
-
-# Print reason breakdown and override stats
-python reconnect_debug.py log-summary output/reconnect_rejection_log.csv
+output/
+  full_pipeline/                Generated runs, ignored by git.
 ```
 
----
+## Reconnect Notes
 
-## v7 vs v6 — what changed and why
+`reconnect_utils_curvy` extends the straight evaluator for CNT work. The important behavior is:
 
-### Root cause fixed by v7
+- Curvature-aware candidate rescue so curved fragments are not rejected only because they fail a straight-line residual gate.
+- Clear short-gap merge handling for visually obvious reconnections.
+- Same-direction absorb handling for tiny fragments that lie on top of a longer trunk.
+- A sharper turn cap for clear merges so obvious raster noise does not create severe kinked bundles.
+- Relabeling lets longer surviving trunks claim overlaps first.
 
-In v6, slightly-curved filament gaps were rejected by `min_forward_cos` and `max_line_residual_px` before the arc-miss check ever ran. The arc prediction was a final cosmetic gate, not an early rescue mechanism.
+Curvy-only config keys live in the `[curvy]` section of `3.reconnect/reconnect_config.yaml`, including `clear_merge_max_turn_deg`, `same_dir_absorb_max_dist_px`, `same_dir_absorb_max_line_resid_px`, `same_dir_absorb_max_arc_miss_px`, and `same_dir_absorb_min_parallel`.
 
-### The seven changes
+## Stringart Acceptance
 
-| # | Change | Effect |
-|---|--------|--------|
-| 1 | **Arc miss computed first** — before angular gates | Enables arc agreement to relax downstream gates |
-| 2 | **Curvature-adaptive relaxation** — `curv_relax = min(max_curv_relax, mean_curv × curv_relax_factor)` lowers `min_forward_cos` and `min_inward_opposition` | Curved-tip pairs that are naturally misaligned from the gap vector survive |
-| 3 | **OR-gate on line residual** — pair passes if `line_ok OR arc_ok` | The critical fix: curvy fragments that fail the straight-line residual pass via arc prediction |
-| 4 | **Curvature-delta gated only when arc disagrees** | Two fragments with different local curvature still connect if their arcs land near each other |
-| 5 | **Turn tolerance relaxed by `curv_relax × 40°`** | Hermite bridges over curved gaps inherently turn more |
-| 6 | **`arc_miss` added as score term** (weight 0.8) | Ranker prefers pairs whose extrapolated arcs agree best |
-| 7 | **Clear-merge override** — if `dist ≤ 15`, `line_resid ≤ 4 px`, `arc_miss ≤ 5 px` (or dist ≤ 2), and `opposition ≥ 0.85`, bypass `forward_cos`, `max_turn_deg`, and `bridge_intrusion` | Rescues true-positive merges killed by tip-direction noise on short rasterized skeleton traces |
+`1.stringart/stringart_tiles.py` uses conservative Hough defaults plus a mask-support density gate:
 
-### Implementation strategy
-
-v7 monkey-patches `_v6._evaluate_tip_pair` inside `reconnect_components`, then restores it. The ~230-line greedy engine is not duplicated.
-
-### New config keys in reconnect_config_v7.yaml
-
-```yaml
-thresholds:
-  max_arc_miss_px: 15.0              # absolute arc-miss gate (px)
-  clear_merge_max_dist_px: 15.0      # override window: max tip distance
-  clear_merge_max_line_resid_px: 4.0 # override window: max line residual
-  clear_merge_max_arc_miss_px: 5.0   # override window: max arc miss
-  clear_merge_min_opposition: 0.85   # override window: min tip-face opposition
-advanced:
-  curv_relax_factor: 30.0      # curvature × factor → cosine slack
-  max_curv_relax: 0.30         # cap on curvature-driven angular slack
-weights:
-  arc_miss: 0.8                # score penalty per unit arc_miss_norm
-debug:
-  rejection_log_path: 'output/reconnect_rejection_log.csv'  # null to disable
+```text
+MIN_ACCEPT_NEWPIX      6
+MIN_ACCEPT_DENSITY     0.45
+HOUGH_THRESHOLD        18
+HOUGH_MIN_LINE_LENGTH  4
+HOUGH_MAX_LINE_GAP     5
+RESIDUAL_DILATE_KERNEL 2
 ```
 
-### Rejection log
+The goal is to reject fake long chords over black background. A line can still bridge tiny raster gaps, but most of the proposed line must lie on the original mask. `--min-accept-density`, `--residual-dilate-kernel`, and `--residual-dilate-iters` are exposed as CLI overrides.
 
-When `debug.rejection_log_path` is set, every pair evaluation is written to a CSV with columns: `stage, base_id, tar_id, base_tip, tar_tip, base/tar tip coords, reason, dist, forward_base/tar, inward_opposition, width_ratio, line_resid, arc_miss_px, curv_delta, intrusion_frac, smooth_rms, max_turn_deg, eff_forward_cos, eff_opposition, eff_max_turn, mean_curv, curv_relax, arc_ok, line_ok, clear_merge`.
+## End-To-End Runner
 
-Use `_grep_log.py` to look up why a specific pair was rejected by its tip coordinates.
+Use `Tools/run_full_sem_pipeline.py` from the repo root:
 
-Two-stage config: stage1 is strict (tight thresholds, conservative relaxation), stage2 is relaxed (generous arc tolerance, aggressive curvature relaxation).
-
-### Does v7 actually perform better?
-
-**Yes, for curvy filament datasets — by design.** The fix is architecturally sound:
-- Curved pairs that v6 silently discarded in the first two gates are now evaluated fully.
-- The OR-gate prevents false rejections caused by the straight-line residual on genuinely curved gaps.
-- The arc-miss score term means the ranker doesn't just accept more — it ranks curvy matches by geometric quality.
-
-**Caveat:** No quantitative benchmark is checked into this repo. The `--compare` flag in `reconnect_run.py` will compute recall/precision against a GT JSON if you have one. For straight filaments, v6 and v7 should produce nearly identical results (curvature ≈ 0 → `curv_relax` ≈ 0 → gates identical).
-
----
-
-## How to run
-
-```bash
-# Vectorize a mask into branches
-python stringart/stringart_tiles.py          # edit CONFIG dict at top
-
-# Reconnect with v7 (two-stage, curvy-aware)
-cd reconnect
-python reconnect_run.py \
-    --version v7 \
-    --config reconnect_config_v7.yaml \
-    --input input/<image_folder> \
-    --output output/<image_folder>
-
-# Compare against GT JSON
-python reconnect_run.py --version v7 --config reconnect_config_v7.yaml \
-    --input input/<image_folder> --output output/<image_folder> --compare
+```powershell
+python Tools\run_full_sem_pipeline.py `
+  --mask 1.stringart\input\SEM05\crops\sem_full_00006_mask255_crop.png `
+  --background 1.stringart\input\SEM05\crops\sem_full_00006_overlay_crop.png
 ```
+
+The runner creates:
+
+```text
+output\full_pipeline\<base>\1.stringart\
+output\full_pipeline\<base>\2.preprocess\
+output\full_pipeline\<base>\3.reconnect\
+output\full_pipeline\<base>\4.postprocess\
+output\full_pipeline\<base>\final\
+```
+
+The `final` folder is the handoff folder. It contains the final overlay, final labels, colored instance preview, pipeline manifest, copied background image, and `<base>_bundles_dem.json`.
+
+## Preprocess
+
+`2.preprocess/preprocess_stringart_branches.py` prepares stringart branch masks for reconnect:
+
+- Reads `*_branch_*.png` files from the stringart `branches` folder.
+- Uses stringart `run_config.json` to recover the angle center for each branch.
+- Thresholds every branch to a clean binary mask.
+- Removes small connected components.
+- Applies an oriented morphological close along that branch angle to close small raster gaps.
+- Writes cleaned branch PNGs, a merged branch mask, copied width metadata, and `pre_process_summary.json`.
+
+The intent is conservative cleanup: keep the stringart branch identities, remove obvious specks, and make fragmented line masks less brittle before reconnect scoring.
+
+## Postprocess
+
+`4.postprocess/post_process_reconnect.py` prepares reconnect labels for the final handoff:
+
+- Reads the raw `*_reconnect_labels.tif` instance image.
+- Splits disconnected components that accidentally share one label.
+- Drops very short pieces below `--min-keep-len`.
+- Absorbs short nearby pieces into longer neighboring bundles using an `--absorb-radius` halo.
+- Skeletonizes each kept bundle and extracts a dominant centerline.
+- Smooths that centerline with `--smooth-window`.
+- Redraws it as a slightly thicker label using `--thicken-px`.
+- Writes post labels, color preview, overlay, and `post_process_summary.json`.
+
+The intent is to make each bundle look like one cleaner physical filament instance before final overlay and DEM JSON export.
+
+## Interactive Review
+
+Final outputs can be opened with the existing reconnect interactive tool:
+
+```powershell
+python 3.reconnect\reconnect_interactive.py `
+  --input output\full_pipeline\<base>\final `
+  --base <base> `
+  --label full_pipeline
+```
+
+Recent runs:
+
+```text
+output\full_pipeline\sem_full_00008_mask255_crop\final
+output\full_pipeline\sem_full_00006_mask255_crop\final
+```
+
+## DEM JSON Contract
+
+The DEM export uses schema `filaseg.dem_bundles.v1`.
+
+Top-level fields:
+
+```text
+schema
+units
+coordinate_system
+image_shape_rc
+bundle_count
+source
+parameters
+bundles
+```
+
+Per-bundle fields:
+
+```text
+id
+area_px
+bbox_rc
+bbox_xyxy
+centroid_rc
+centroid_xy
+length_px
+mean_width_px
+endpoints_rc
+endpoints_xy
+centerline_rc
+centerline_xy
+```
+
+Coordinates are pixel coordinates. `rc` means `[row, col]`; `xy` means `[x=col, y=row]`.
 
 ## Environment
 
-```bash
-conda env create -f mtquant.yml
-conda activate mtquant
-```
+The current workflow has been run with `C:\Repos\venv_cnt\Scripts\python.exe` and depends on `numpy`, `scipy`, `scikit-image`, `opencv-python`, `matplotlib`, and `pyyaml`.

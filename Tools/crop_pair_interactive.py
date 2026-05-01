@@ -10,8 +10,8 @@ from matplotlib.patches import Rectangle
 from matplotlib.widgets import RectangleSelector
 
 
-DEFAULT_MASK = Path(r"C:\Repos\filaments_quantification\stringart\input\SEM08\sem_full_00008_mask255.png")
-DEFAULT_OVERLAY = Path(r"C:\Repos\filaments_quantification\stringart\input\SEM08\sem_full_00008_overlay.png")
+DEFAULT_MASK    = Path(r"C:\Repos\filaments_quantification\input\sem_full_00000_1p66\sem_full_00000_1p66_mask255.png")
+DEFAULT_OVERLAY = Path(r"C:\Repos\filaments_quantification\input\sem_full_00000_1p66\sem_full_00000_1p66_overlay.png")
 
 
 def parse_args() -> argparse.Namespace:

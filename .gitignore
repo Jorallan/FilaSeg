@@ -12,7 +12,7 @@ venv/
 .venv/
 env/
 
-# IDE / Editor
+# IDE / editor
 .vs/
 .vscode/
 .claude/
@@ -27,9 +27,13 @@ Thumbs.db
 # OS
 desktop.ini
 
-# Data folders — inputs, outputs, analysis results
-stringart/input/
-stringart/output/
-reconnect/input/
-reconnect/output/
-reconnect/analysis/
+# Data folders - inputs, outputs, analysis results
+output/
+input/
+1.stringart/input/
+1.stringart/output/
+2.preprocess/output/
+3.reconnect/input/
+3.reconnect/output/
+3.reconnect/analysis/
+4.postprocess/output/

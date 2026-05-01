@@ -33,8 +33,8 @@ import numpy as np
 # ============================================================
 CONFIG: Dict[str, Any] = {
     # --- IO ---
-    "INPUT_PATH":         r"C:\Repos\filaments_quantification\stringart\input\cnt_orient_0003_merge.png",
-    "OUTPUT_ROOT":        r"C:\Repos\filaments_quantification\stringart\output\cnt_orient_0003_merge",
+    "INPUT_PATH":         r"C:\Repos\filaments_quantification\1.stringart\input\cnt_orient_0003_merge.png",
+    "OUTPUT_ROOT":        r"C:\Repos\filaments_quantification\1.stringart\output\cnt_orient_0003_merge",
     "OUTPUT_FOLDER_NAME": None,   # None → timestamp; or set a string like "my_run"
     "BIN_THRESHOLD":      127,
 
@@ -67,6 +67,7 @@ CONFIG: Dict[str, Any] = {
     # --- Candidate evaluation ---
     "MAX_CANDIDATES_TO_TRY": 300,   # try only top-N longest candidates per iteration
     "MIN_HARD_LINE_LENGTH":  3,     # hard floor for HOUGH_MIN_LINE_LENGTH after scaling/tuning
+    "MIN_ACCEPT_DENSITY":    0.45,  # fraction of candidate line that must lie on the original mask
 
     # --- Residual dilation before Hough (kept manual) ---
     "RESIDUAL_DILATE_KERNEL": 2,   # kernel size; <3 = disabled
@@ -141,6 +142,9 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--hough-min-line-length", type=int, default=None)
     ap.add_argument("--hough-max-line-gap", type=int, default=None)
     ap.add_argument("--min-accept-newpix", type=int, default=None)
+    ap.add_argument("--min-accept-density", type=float, default=None)
+    ap.add_argument("--residual-dilate-kernel", type=int, default=None)
+    ap.add_argument("--residual-dilate-iters", type=int, default=None)
     ap.add_argument("--use-skeletonize", action="store_true", default=None)
     ap.add_argument("--no-skeletonize", action="store_false", dest="use_skeletonize")
     ap.add_argument("--auto-scale", action="store_true", default=None)
@@ -161,6 +165,9 @@ def apply_cli_overrides(args: argparse.Namespace) -> None:
         "hough_min_line_length": "HOUGH_MIN_LINE_LENGTH",
         "hough_max_line_gap": "HOUGH_MAX_LINE_GAP",
         "min_accept_newpix": "MIN_ACCEPT_NEWPIX",
+        "min_accept_density": "MIN_ACCEPT_DENSITY",
+        "residual_dilate_kernel": "RESIDUAL_DILATE_KERNEL",
+        "residual_dilate_iters": "RESIDUAL_DILATE_ITERS",
         "use_skeletonize": "USE_SKELETONIZE",
         "auto_scale": "AUTO_SCALE_PARAMS",
     }
@@ -323,6 +330,7 @@ def autoscale_4_params(cfg: Dict[str, Any], est_width_px: float) -> Dict[str, An
         "MIN_ACCEPT_NEWPIX":    scale("MIN_ACCEPT_NEWPIX",    0.95, "AUTO_SCALE_MIN_ACCEPT_NEWPIX_MULT"),
         # manual passthroughs
         "DRAW_THICKNESS":          int(cfg["DRAW_THICKNESS"]),
+        "MIN_ACCEPT_DENSITY":      float(cfg.get("MIN_ACCEPT_DENSITY", 0.0)),
         "RESIDUAL_DILATE_KERNEL":  int(cfg.get("RESIDUAL_DILATE_KERNEL", 0)),
         "RESIDUAL_DILATE_ITERS":   int(cfg.get("RESIDUAL_DILATE_ITERS", 1)),
         # metadata
@@ -405,6 +413,7 @@ def greedy_decompose_tile(
     h_minlen = int(rp("HOUGH_MIN_LINE_LENGTH"))
     h_maxgap = int(rp("HOUGH_MAX_LINE_GAP"))
     min_newpix   = int(rp("MIN_ACCEPT_NEWPIX"))
+    min_density  = float(rp("MIN_ACCEPT_DENSITY"))
     base_thickness = int(rp("DRAW_THICKNESS"))
     max_lines    = int(CONFIG["MAX_LINES_PER_TILE"])
     max_try      = int(CONFIG["MAX_CANDIDATES_TO_TRY"])
@@ -444,15 +453,19 @@ def greedy_decompose_tile(
 
             accepted = False
             for _, (x1, y1, x2, y2) in cand[:max_try]:
-                # try each thickness; pick the one that covers the most new residual pixels
+                # Accept only lines supported by the original mask; this blocks
+                # long chords that touch a few pixels but mostly cross black BG.
                 best_lm, best_newpix, best_th = None, -1, None
                 for th in th_try:
                     lm = draw_line_mask(residual.shape, x1, y1, x2, y2, th)
-                    np_ = cv2.countNonZero(cv2.bitwise_and(residual, lm))
-                    if np_ > best_newpix:
-                        best_newpix, best_lm, best_th = int(np_), lm, th
+                    line_px = max(1, cv2.countNonZero(lm))
+                    new_px = int(cv2.countNonZero(cv2.bitwise_and(residual, lm)))
+                    support_px = int(cv2.countNonZero(cv2.bitwise_and(target, lm)))
+                    density = support_px / float(line_px)
+                    if new_px >= min_newpix and density >= min_density and new_px > best_newpix:
+                        best_newpix, best_lm, best_th = new_px, lm, th
 
-                if best_lm is None or best_newpix < min_newpix:
+                if best_lm is None:
                     continue  # not enough new pixels — try next candidate
 
                 # accept: subtract from residual, add to reconstruction
@@ -478,6 +491,7 @@ def greedy_decompose_tile(
         "angle_bins":            bins,
         "used_skeletonize":      bool(CONFIG["USE_SKELETONIZE"]),
         "used_thickness_hist":   {str(k): int(v) for k, v in sorted(thickness_hist.items())},
+        "min_accept_density":    float(min_density),
         "runtime_params":        runtime_params or {},
     }
     return recon, recon_thin, branches, stats
@@ -601,6 +615,7 @@ def auto_tune_params(
             ("HOUGH_THRESHOLD", "HOUGH_MIN_LINE_LENGTH", "HOUGH_MAX_LINE_GAP", "MIN_ACCEPT_NEWPIX")}
     fixed = {
         "DRAW_THICKNESS":         int(seed.get("DRAW_THICKNESS",         CONFIG["DRAW_THICKNESS"])),
+        "MIN_ACCEPT_DENSITY":     float(seed.get("MIN_ACCEPT_DENSITY",   CONFIG.get("MIN_ACCEPT_DENSITY", 0.0))),
         "RESIDUAL_DILATE_KERNEL": int(seed.get("RESIDUAL_DILATE_KERNEL", CONFIG.get("RESIDUAL_DILATE_KERNEL", 0))),
         "RESIDUAL_DILATE_ITERS":  int(seed.get("RESIDUAL_DILATE_ITERS",  CONFIG.get("RESIDUAL_DILATE_ITERS", 1))),
     }
@@ -714,6 +729,7 @@ def run_experiment_set(
                 )
             rp: Dict[str, Any] = {
                 "DRAW_THICKNESS":         int(CONFIG["DRAW_THICKNESS"]),
+                "MIN_ACCEPT_DENSITY":     float(CONFIG.get("MIN_ACCEPT_DENSITY", 0.0)),
                 "RESIDUAL_DILATE_KERNEL": int(CONFIG.get("RESIDUAL_DILATE_KERNEL", 0)),
                 "RESIDUAL_DILATE_ITERS":  int(CONFIG.get("RESIDUAL_DILATE_ITERS",  1)),
                 "HOUGH_THRESHOLD":        int(CONFIG["HOUGH_THRESHOLD"]),
@@ -771,6 +787,7 @@ def main() -> None:
     # Initialise runtime_params from CONFIG; will be overwritten by autoscale/tune below
     runtime_params: Dict[str, Any] = {
         "DRAW_THICKNESS":          int(CONFIG["DRAW_THICKNESS"]),
+        "MIN_ACCEPT_DENSITY":      float(CONFIG.get("MIN_ACCEPT_DENSITY", 0.0)),
         "RESIDUAL_DILATE_KERNEL":  int(CONFIG.get("RESIDUAL_DILATE_KERNEL", 0)),
         "RESIDUAL_DILATE_ITERS":   int(CONFIG.get("RESIDUAL_DILATE_ITERS", 1)),
         "HOUGH_THRESHOLD":         int(CONFIG["HOUGH_THRESHOLD"]),
@@ -795,6 +812,7 @@ def main() -> None:
               f"gap={runtime_params['HOUGH_MAX_LINE_GAP']}  "
               f"min_newpix={runtime_params['MIN_ACCEPT_NEWPIX']}")
         print(f"[AUTO_SCALE] manual     -> thickness={runtime_params['DRAW_THICKNESS']}  "
+              f"min_density={runtime_params['MIN_ACCEPT_DENSITY']:.2f}  "
               f"dil_k={runtime_params['RESIDUAL_DILATE_KERNEL']}  "
               f"dil_i={runtime_params['RESIDUAL_DILATE_ITERS']}")
 
