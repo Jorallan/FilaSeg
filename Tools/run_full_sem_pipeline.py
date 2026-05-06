@@ -24,8 +24,8 @@ ROOT = Path(__file__).resolve().parents[1]
 # ══════════════════════════════════════════════════════════════════════════
 
 # ── Inputs / outputs ──────────────────────────────────────────────────────
-DEFAULT_MASK = ROOT / "input" / "SEM08" / "crops" / "sem_full_00008_mask255_crop.png"
-DEFAULT_BG   = ROOT / "input" / "SEM08" / "crops" / "sem_full_00008_overlay_crop.png"
+DEFAULT_MASK = ROOT / "input" / "SEM08"  / "crops"/ "sem_full_00008_mask255_crop.png"
+DEFAULT_BG   = ROOT / "input" / "SEM08"  / "crops"/ "sem_full_00008_overlay_crop.png"
 DEFAULT_OUT  = ROOT / "output" / "full_pipeline"
 
 # ── Reconnect ─────────────────────────────────────────────────────────────
@@ -37,14 +37,16 @@ DEFAULT_PRE_BIN_THRESHOLD    = 127  # grayscale threshold for binarising branch 
 DEFAULT_PRE_LINE_CLOSE_LEN   = 4    # oriented closing kernel length (px)
 DEFAULT_PRE_LINE_CLOSE_ITERS = 2    # closing iterations
 DEFAULT_PRE_MIN_COMPONENT    = 4    # drop connected components smaller than this (px)
+DEFAULT_PRE_CLEAN_TO_PATH    = True # reduce multi-tip components to dominant 2-tip path
+DEFAULT_PRE_CLEAN_SMOOTH_WIN = 7    # smoothing window for the dominant path
 
 # ── Postprocess (stage 4) ─────────────────────────────────────────────────
-DEFAULT_THICKEN_PX         = 5    # px to thicken each final bundle centerline
+DEFAULT_THICKEN_PX         = 8    # px to thicken each final bundle centerline
 DEFAULT_SMOOTH_WINDOW      = 8    # moving-window size for centerline smoothing
 DEFAULT_MIN_KEEP_LEN       = 12   # drop bundles whose skeleton is shorter than this (px)
 DEFAULT_ABSORB_LEN         = 30   # absorb bundles shorter than this into a longer neighbour
 DEFAULT_ABSORB_RADIUS      = 6    # halo radius (px) for neighbour detection during absorb
-DEFAULT_BRIDGE_RADIUS      = 4    # re-join same-source split pieces within this radius
+DEFAULT_BRIDGE_RADIUS      = 12   # re-join same-source split pieces within this radius
 DEFAULT_OVERLAY_ALPHA      = 0.72 # overlay blend (0 = background only, 1 = labels only)
 
 # ── DEM JSON ──────────────────────────────────────────────────────────────
@@ -72,6 +74,8 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--pre-line-close-len",   type=int,   default=DEFAULT_PRE_LINE_CLOSE_LEN)
     ap.add_argument("--pre-line-close-iters", type=int,   default=DEFAULT_PRE_LINE_CLOSE_ITERS)
     ap.add_argument("--pre-min-component",    type=int,   default=DEFAULT_PRE_MIN_COMPONENT)
+    ap.add_argument("--pre-clean-to-path",   action=argparse.BooleanOptionalAction, default=DEFAULT_PRE_CLEAN_TO_PATH)
+    ap.add_argument("--pre-clean-smooth-win",type=int,   default=DEFAULT_PRE_CLEAN_SMOOTH_WIN)
     # postprocess
     ap.add_argument("--thicken-px",      type=int,   default=DEFAULT_THICKEN_PX)
     ap.add_argument("--smooth-window",   type=int,   default=DEFAULT_SMOOTH_WINDOW)
@@ -256,6 +260,8 @@ def main() -> None:
         "--line-close-len",   str(args.pre_line_close_len),
         "--line-close-iters", str(args.pre_line_close_iters),
         "--min-component-area", str(args.pre_min_component),
+        *(["--clean-to-path"] if args.pre_clean_to_path else ["--no-clean-to-path"]),
+        "--clean-smooth-win", str(args.pre_clean_smooth_win),
     ])
     run([
         args.python, "reconnect_run.py",
@@ -307,10 +313,7 @@ def main() -> None:
         "base": base,
         "run_dir": str(run_dir),
         "final_dir": str(final_out),
-        "interactive_command": (
-            f"python 3.reconnect\\reconnect_interactive.py --input {final_out} "
-            f"--base {base} --label full_pipeline"
-        ),
+        "interactive_command": f"python Tools\\visualize_ids.py --input {final_out}",
         "bundle_count": int(dem["bundle_count"]),
         "paths": {k: str(v) for k, v in paths.items()},
     }

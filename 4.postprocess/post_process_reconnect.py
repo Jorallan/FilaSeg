@@ -28,7 +28,7 @@ DEFAULT_SMOOTH_WINDOW           = 7    # moving-window size for centerline smoot
 DEFAULT_MIN_KEEP_LEN            = 10   # drop bundles whose skeleton is shorter than this (px)
 DEFAULT_ABSORB_LEN              = 28   # absorb bundles shorter than this into a longer neighbour
 DEFAULT_ABSORB_RADIUS           = 5    # halo radius (px) for neighbour detection during absorb
-DEFAULT_SAME_SOURCE_BRIDGE_RADIUS = 3  # merge disconnected pieces sharing the same source label within this radius
+DEFAULT_SAME_SOURCE_BRIDGE_RADIUS = 12 # merge disconnected pieces sharing the same source label within this radius
 DEFAULT_OVERLAY_ALPHA           = 0.72 # blend weight for the coloured overlay (0 = background only, 1 = labels only)
 # ─────────────────────────────────────────────────────────────────────────
 

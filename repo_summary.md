@@ -17,6 +17,8 @@ This repository is being shaped into a CNT bundle extraction pipeline:
 Tools/
   crop_pair_interactive.py      Matplotlib paired cropper for aligned mask/overlay images.
   run_full_sem_pipeline.py      End-to-end runner for the current SEM bundle workflow.
+  visualize_ids.py             Interactive viewer for label IDs in reconnect/final outputs.
+  trace_component.py           Label-ID provenance tool for branch origins.
   mask_edit.py                  Legacy OpenCV mask editing utility.
 
 1.stringart/
@@ -29,7 +31,6 @@ Tools/
 
 3.reconnect/
   reconnect_run.py              Main reconnect CLI.
-  reconnect_interactive.py      Interactive viewer/tuner for reconnect-style outputs.
   reconnect_debug.py            Inspection and rejection-log helper.
   reconnect_utils_straight.py   Standard straight-line evaluator.
   reconnect_utils_curvy.py      Arc-aware evaluator for curved filaments (CNT default).
@@ -51,6 +52,7 @@ output/
 - Same-direction absorb handling for tiny fragments that lie on top of a longer trunk.
 - A sharper turn cap for clear merges so obvious raster noise does not create severe kinked bundles.
 - Relabeling lets longer surviving trunks claim overlaps first.
+- The straight evaluator can write candidate rejection/acceptance metrics to `debug.rejection_log_path`.
 
 Curvy-only config keys live in the `[curvy]` section of `3.reconnect/reconnect_config.yaml`, including `clear_merge_max_turn_deg`, `same_dir_absorb_max_dist_px`, `same_dir_absorb_max_line_resid_px`, `same_dir_absorb_max_arc_miss_px`, and `same_dir_absorb_min_parallel`.
 
@@ -100,6 +102,7 @@ The `final` folder is the handoff folder. It contains the final overlay, final l
 - Thresholds every branch to a clean binary mask.
 - Removes small connected components.
 - Applies an oriented morphological close along that branch angle to close small raster gaps.
+- Optionally reduces multi-tip components to the dominant smoothed two-tip skeleton path.
 - Writes cleaned branch PNGs, a merged branch mask, copied width metadata, and `pre_process_summary.json`.
 
 The intent is conservative cleanup: keep the stringart branch identities, remove obvious specks, and make fragmented line masks less brittle before reconnect scoring.
@@ -119,15 +122,23 @@ The intent is conservative cleanup: keep the stringart branch identities, remove
 
 The intent is to make each bundle look like one cleaner physical filament instance before final overlay and DEM JSON export.
 
-## Interactive Review
+## Interactive Review And Tracing
 
-Final outputs can be opened with the existing reconnect interactive tool:
+Final outputs can be opened with the label-ID viewer:
 
 ```powershell
-python 3.reconnect\reconnect_interactive.py `
-  --input output\full_pipeline\<base>\final `
-  --base <base> `
-  --label full_pipeline
+python Tools\visualize_ids.py --input output\full_pipeline\<base>\final
+```
+
+For direct script use, `Tools/visualize_ids.py` also supports `--ask-input` or editing `SCRIPT_INPUT`.
+
+Label IDs can be traced back to preprocess/stringart branch origins:
+
+```powershell
+python Tools\trace_component.py `
+  --run output\full_pipeline\<base> `
+  --step final `
+  --ids 25 38 42
 ```
 
 Recent runs:

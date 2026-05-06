@@ -39,11 +39,11 @@ advanced:
   fit_points: 12
   smooth_trace_points: 22
   bridge_samples: 24
-  bridge_tangent_scale: 0.12
+  bridge_tangent_scale: 0.30    # was 0.12 — longer Hermite handles give smoother junctions
   bridge_clearance_px: 0
   component_mask_mode: skeletonized
-  max_component_tips: 8
-  min_tip_trace_len_px: 3.0
+  max_component_tips: 16
+  min_tip_trace_len_px: 0.0   # disabled — inter-branch stringart gaps produce valid 1-3px stubs
 
 weights:
   distance: 0.50
@@ -64,6 +64,9 @@ outputs:
   overlay_alpha: 0.3
   save_label_previews: true
 
+debug:
+  rejection_log_path: 'output/rejection_log_straight.csv'
+
 runtime:
   verbose: true
   print_every_pass: 1
@@ -76,24 +79,24 @@ stage1:
     max_passes: 4
   thresholds:
     max_tip_distance_px: 20
-    min_forward_cos: 0.90
-    min_inward_opposition: 0.60
+    min_forward_cos: 0.85        # was 0.90 — relaxed to catch near-perfect short-gap pairs
+    min_inward_opposition: 0.55  # was 0.60
     max_turn_deg: 45.0
-    max_line_residual_px: 5
-    max_bridge_intrusion_frac: 0.15
+    max_line_residual_px: 6      # was 5
+    max_bridge_intrusion_frac: 0.22  # was 0.15 — allows 1 crossing filament on a short bridge
     max_arc_miss_frac: 0.55
 
 stage2:
   runtime:
     max_passes: 6
   thresholds:
-    max_tip_distance_px: 50
+    max_tip_distance_px: 55      # was 50
     min_forward_cos: 0.72
-    min_inward_opposition: 0.40
-    max_turn_deg: 75.0
-    max_line_residual_px: 12
+    min_inward_opposition: 0.40  # restored from 0.35 — 0.35 allowed too-perpendicular merges
+    max_turn_deg: 70.0           # was 75 — slightly stricter to reduce bad bends
+    max_line_residual_px: 16     # was 12 — catches offset pairs with good forward alignment
     max_curvature_delta: 0.20
-    max_bridge_intrusion_frac: 0.25
+    max_bridge_intrusion_frac: 0.32  # was 0.25
     max_smooth_rms_px: 5.5
     max_arc_miss_frac: 0.75
 

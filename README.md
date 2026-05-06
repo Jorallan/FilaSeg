@@ -10,6 +10,8 @@ The current CNT workflow starts from a binary mask and a greyscale/overlay image
 Tools/
   crop_pair_interactive.py      Interactive paired cropper for mask + overlay images.
   run_full_sem_pipeline.py      End-to-end SEM mask -> bundles runner.
+  visualize_ids.py             Interactive label-ID viewer for reconnect/final outputs.
+  trace_component.py           Trace label IDs back to preprocess/stringart branches.
   mask_edit.py                  Legacy/manual mask editor utility.
 
 1.stringart/
@@ -22,7 +24,6 @@ Tools/
 
 3.reconnect/
   reconnect_run.py              CLI entry point, supports --version straight/curvy.
-  reconnect_interactive.py      Interactive viewer/tuner for reconnect outputs.
   reconnect_debug.py            Inspection and rejection-log helper.
   reconnect_utils_straight.py   Standard straight-line evaluator.
   reconnect_utils_curvy.py      Arc-aware evaluator for curved filaments (CNT default).
@@ -80,13 +81,21 @@ Expected final files:
 
 ## Interactive Review
 
-The final folder uses the same naming convention as reconnect outputs, so it can be opened with:
+The final folder uses the same naming convention as reconnect outputs, so it can be opened with the label-ID viewer:
 
 ```powershell
-python 3.reconnect\reconnect_interactive.py `
-  --input output\full_pipeline\<base>\final `
-  --base <base> `
-  --label full_pipeline
+python Tools\visualize_ids.py --input output\full_pipeline\<base>\final
+```
+
+For direct IDE/script use, edit `SCRIPT_INPUT` in `Tools/visualize_ids.py`, or run `python Tools\visualize_ids.py --ask-input` to type the folder path at startup.
+
+To trace final or intermediate label IDs back to their preprocess/stringart branch origins:
+
+```powershell
+python Tools\trace_component.py `
+  --run output\full_pipeline\<base> `
+  --step final `
+  --ids 25 38 42
 ```
 
 ## DEM JSON
@@ -95,9 +104,11 @@ python 3.reconnect\reconnect_interactive.py `
 
 ## Preprocess And Postprocess
 
-`2.preprocess/preprocess_stringart_branches.py` runs after stringart and before reconnect. It thresholds each per-angle branch image, removes tiny connected components, applies an angle-matched morphological close to bridge small gaps inside each branch, removes tiny components again, and writes a cleaned branch set plus a merged preview and JSON summary. It uses `run_config.json` from stringart to know the angle of each branch.
+`2.preprocess/preprocess_stringart_branches.py` runs after stringart and before reconnect. It thresholds each per-angle branch image, removes tiny connected components, applies an angle-matched morphological close to bridge small gaps inside each branch, optionally reduces multi-tip components to their dominant smoothed two-tip skeleton path, and writes a cleaned branch set plus a merged preview and JSON summary. It uses `run_config.json` from stringart to know the angle of each branch. The full runner exposes this as `--pre-clean-to-path` / `--no-pre-clean-to-path` and `--pre-clean-smooth-win`.
 
 `4.postprocess/post_process_reconnect.py` runs after reconnect. It splits disconnected pieces that share a label, drops very short fragments, absorbs short nearby pieces into longer neighboring bundles, skeletonizes each kept bundle, extracts its dominant path, smooths that path with a moving window, redraws the bundle as a slightly thicker polyline, and writes final labels, color preview, overlay, and a summary. The full runner then copies these into `final` and builds the DEM JSON.
+
+Reconnect rejection logging can be enabled through the `debug.rejection_log_path` key in `3.reconnect/reconnect_config.yaml`; the straight evaluator writes candidate accept/reject metrics to that CSV path.
 
 ## Stringart Acceptance
 

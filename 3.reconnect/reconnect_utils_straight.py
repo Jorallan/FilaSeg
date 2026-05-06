@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import csv
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -13,6 +15,58 @@ from skimage.measure import label as cc_label
 from skimage.morphology import skeletonize
 
 Coord = Tuple[int, int]  # (row, col)
+
+# ── Rejection logger ──────────────────────────────────────────────────────
+
+_LOG_FH = None
+_LOG_WRITER = None
+_LOG_PATHS_WRITTEN: set = set()
+_CURRENT_STAGE: str = ""
+_LOG_COLUMNS = [
+    "stage", "base_id", "tar_id", "base_tip", "tar_tip",
+    "base_tip_r", "base_tip_c", "tar_tip_r", "tar_tip_c",
+    "reason",
+    "dist", "forward_base", "forward_tar", "inward_opposition",
+    "width_ratio", "line_resid", "arc_miss_frac", "curv_delta",
+    "intrusion_frac", "smooth_rms", "max_turn_deg",
+]
+
+
+def _open_rejection_log(path: str) -> None:
+    global _LOG_FH, _LOG_WRITER
+    _close_rejection_log()
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    abs_path = os.path.abspath(path)
+    write_header = abs_path not in _LOG_PATHS_WRITTEN
+    _LOG_FH = open(path, "w" if write_header else "a", newline="", encoding="utf-8")
+    _LOG_WRITER = csv.DictWriter(_LOG_FH, fieldnames=_LOG_COLUMNS)
+    if write_header:
+        _LOG_WRITER.writeheader()
+        _LOG_PATHS_WRITTEN.add(abs_path)
+
+
+def _close_rejection_log() -> None:
+    global _LOG_FH, _LOG_WRITER
+    if _LOG_FH is not None:
+        try:
+            _LOG_FH.close()
+        except Exception:
+            pass
+    _LOG_FH = None
+    _LOG_WRITER = None
+
+
+def _log_row(rec: Dict) -> None:
+    if _LOG_WRITER is None:
+        return
+    rec.setdefault("stage", _CURRENT_STAGE)
+    _LOG_WRITER.writerow({k: rec.get(k, "") for k in _LOG_COLUMNS})
+    try:
+        _LOG_FH.flush()
+    except Exception:
+        pass
 
 
 # ── I/O and basic masks ───────────────────────────────────────────────────
@@ -671,18 +725,31 @@ def _evaluate_tip_pair(
     bp, bd, bcurv, btrace = _tip_data(base, base_tip_name)
     tp, td, tcurv, ttrace = _tip_data(tar, tar_tip_name)
 
+    rec: Dict = {
+        "base_id": int(base.id), "tar_id": int(tar.id),
+        "base_tip": base_tip_name, "tar_tip": tar_tip_name,
+        "base_tip_r": float(bp[0]), "base_tip_c": float(bp[1]),
+        "tar_tip_r":  float(tp[0]), "tar_tip_c":  float(tp[1]),
+    }
+
+    def reject(reason: str):
+        rec["reason"] = reason
+        _log_row(rec)
+        return None
+
     bp_arr = np.asarray([float(bp[0]), float(bp[1])], dtype=np.float32)
     tp_arr = np.asarray([float(tp[0]), float(tp[1])], dtype=np.float32)
     if _tip_trace_length(btrace) < float(adv.get("min_tip_trace_len_px", 3.0)):
-        return None
+        return reject("tip_trace_too_short")
     if _tip_trace_length(ttrace) < float(adv.get("min_tip_trace_len_px", 3.0)):
-        return None
+        return reject("tip_trace_too_short")
 
     dvec = tp_arr - bp_arr
     dist = float(np.linalg.norm(dvec))
+    rec["dist"] = dist
     max_tip_dist = float(thr.get("max_tip_distance_px", 40))
     if dist <= 1e-6 or dist > max_tip_dist:
-        return None
+        return reject("distance")
     u = dvec / dist
 
     inward_opposition = float(cosine(bd, td))
@@ -692,22 +759,29 @@ def _evaluate_tip_pair(
     line_resid        = 0.5 * (_perp_distance_point_to_line(tp, bp, -bd) + _perp_distance_point_to_line(bp, tp, td))
     curv_delta        = float(abs(bcurv - tcurv))
 
+    rec.update({
+        "forward_base": forward_base, "forward_tar": forward_tar,
+        "inward_opposition": inward_opposition, "width_ratio": width_ratio,
+        "line_resid": line_resid, "curv_delta": curv_delta,
+    })
+
     min_forward_cos       = float(thr.get("min_forward_cos",       0.65))
     min_inward_opposition = float(thr.get("min_inward_opposition", 0.60))
     max_line_residual     = float(thr.get("max_line_residual_px",  8.0))
 
     if forward_base < min_forward_cos or forward_tar < min_forward_cos:
-        return None
+        return reject("forward_cos")
     if (-inward_opposition) < min_inward_opposition:
-        return None
+        return reject("opposition")
     if width_ratio > float(thr.get("max_width_ratio", 3.0)):
-        return None
+        return reject("width_ratio")
     if line_resid > max_line_residual:
-        return None
+        return reject("line_residual")
     if curv_delta > float(thr.get("max_curvature_delta", 0.15)):
-        return None
+        return reject("curv_delta")
 
     max_arc_miss_frac = float(thr.get("max_arc_miss_frac", 1.0))
+    arc_miss_frac_val = -1.0
     if max_arc_miss_frac < 0.99 and dist > 4.0:
         b_extra = (base.tips or {}).get(base_tip_name, {}).get("extra", None)
         t_extra = (tar.tips  or {}).get(tar_tip_name,  {}).get("extra", None)
@@ -718,8 +792,10 @@ def _evaluate_tip_pair(
                 float(np.linalg.norm(_arc_predicted_position(b_extra, dist) - tp_xy))
                 + float(np.linalg.norm(_arc_predicted_position(t_extra, dist) - bp_xy))
             )
+            arc_miss_frac_val = arc_miss / max(1.0, dist)
+            rec["arc_miss_frac"] = arc_miss_frac_val
             if arc_miss > max_arc_miss_frac * dist:
-                return None
+                return reject("arc_miss_frac")
 
     bridge_pts = _sample_hermite_bridge(
         bp, tp, -bd, td,
@@ -732,8 +808,9 @@ def _evaluate_tip_pair(
     touched = global_label[bridge_eval]
     touched = touched[(touched != 0) & (touched != base.id) & (touched != tar.id)]
     intrusion_frac = float(len(np.unique(touched))) / max(1.0, dist)
+    rec["intrusion_frac"] = intrusion_frac
     if intrusion_frac > float(thr.get("max_bridge_intrusion_frac", 0.10)):
-        return None
+        return reject("bridge_intrusion")
 
     tp_pts = int(adv.get("smooth_trace_points", 18))
     smooth_rms, smooth_curv, max_turn_deg = _local_smoothness_metrics(
@@ -742,10 +819,14 @@ def _evaluate_tip_pair(
         ttrace[:tp_pts] if ttrace is not None else ttrace,
         fit_degree=2,
     )
+    rec.update({"smooth_rms": float(smooth_rms), "max_turn_deg": float(max_turn_deg)})
     if smooth_rms > float(thr.get("max_smooth_rms_px", 3.5)):
-        return None
+        return reject("smooth_rms")
     if max_turn_deg > float(thr.get("max_turn_deg", 45.0)):
-        return None
+        return reject("max_turn")
+
+    rec["reason"] = "accepted"
+    _log_row(rec)
 
     max_curv_delta = float(thr.get("max_curvature_delta", 0.15))
     score_scalar = (
@@ -783,6 +864,23 @@ def _evaluate_tip_pair(
 # ── Reconnection engine ───────────────────────────────────────────────────
 
 def reconnect_components(components: List[Component], cfg: Dict) -> List[Component]:
+    global _CURRENT_STAGE
+    debug_cfg  = cfg.get("debug", {}) or {}
+    log_path   = debug_cfg.get("rejection_log_path")
+    prev_stage = _CURRENT_STAGE
+    _CURRENT_STAGE = str(debug_cfg.get("stage_label", ""))
+    if log_path:
+        _open_rejection_log(str(log_path))
+
+    try:
+        return _reconnect_components_inner(components, cfg)
+    finally:
+        _CURRENT_STAGE = prev_stage
+        if log_path:
+            _close_rejection_log()
+
+
+def _reconnect_components_inner(components: List[Component], cfg: Dict) -> List[Component]:
     thr     = cfg.get("thresholds", {})
     runtime = cfg.get("runtime", {})
     adv     = cfg.get("advanced", {})

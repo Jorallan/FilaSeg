@@ -4,10 +4,13 @@ import argparse
 import json
 import re
 import shutil
+from collections import deque
 from pathlib import Path
 
 import cv2
 import numpy as np
+from scipy.ndimage import convolve as _conv
+from skimage.morphology import skeletonize as _skeletonize
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -17,10 +20,12 @@ ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_INPUT  = ROOT / "1.stringart" / "output" / "sem_full_00000_1p66_mask255_crop" / "branches"
 DEFAULT_OUTPUT = ROOT / "2.preprocess" / "output" / "sem_full_00000_1p66_mask255_crop" / "branches"
 
-DEFAULT_BIN_THRESHOLD    = 127  # grayscale threshold for binarising each branch mask
-DEFAULT_LINE_CLOSE_LEN   = 9    # length of the oriented closing kernel (px); bridges small raster gaps
-DEFAULT_LINE_CLOSE_ITERS = 1    # how many times to apply the closing
-DEFAULT_MIN_COMPONENT_AREA = 8  # remove connected components smaller than this (px)
+DEFAULT_BIN_THRESHOLD      = 127  # grayscale threshold for binarising each branch mask
+DEFAULT_LINE_CLOSE_LEN     = 9    # length of the oriented closing kernel (px); bridges small raster gaps
+DEFAULT_LINE_CLOSE_ITERS   = 1    # how many times to apply the closing
+DEFAULT_MIN_COMPONENT_AREA = 8    # remove connected components smaller than this (px)
+DEFAULT_CLEAN_TO_PATH      = True # reduce each multi-tip component to its dominant 2-tip skeleton path
+DEFAULT_CLEAN_SMOOTH_WIN   = 7    # moving-average window applied to the dominant path before redrawing
 # ─────────────────────────────────────────────────────────────────────────
 
 
@@ -33,6 +38,10 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--line-close-len", type=int, default=DEFAULT_LINE_CLOSE_LEN)
     ap.add_argument("--line-close-iters", type=int, default=DEFAULT_LINE_CLOSE_ITERS)
     ap.add_argument("--min-component-area", type=int, default=DEFAULT_MIN_COMPONENT_AREA)
+    ap.add_argument("--clean-to-path",    action=argparse.BooleanOptionalAction, default=DEFAULT_CLEAN_TO_PATH,
+                    help="Reduce each multi-tip component to its dominant 2-tip skeleton path.")
+    ap.add_argument("--clean-smooth-win", type=int, default=DEFAULT_CLEAN_SMOOTH_WIN,
+                    help="Smoothing window for dominant path before redrawing (1 = off).")
     ap.add_argument("--copy-source", action="store_true", help="Copy raw branch inputs beside output.")
     return ap.parse_args()
 
@@ -98,12 +107,98 @@ def remove_small_components(mask255: np.ndarray, min_area: int) -> np.ndarray:
     return out
 
 
+def _skel_endpoints(skel: np.ndarray) -> list[tuple[int, int]]:
+    k = np.ones((3, 3), np.uint8); k[1, 1] = 0
+    nb = _conv(skel.astype(np.uint8), k, mode="constant", cval=0)
+    return [tuple(int(v) for v in p) for p in np.argwhere((skel > 0) & (nb == 1))]
+
+
+def _bfs_path(skel: np.ndarray, start: tuple, goal: tuple) -> np.ndarray:
+    q = deque([start])
+    parent: dict = {start: None}
+    while q:
+        p = q.popleft()
+        if p == goal:
+            break
+        r, c = p
+        for dr in (-1, 0, 1):
+            for dc in (-1, 0, 1):
+                if dr == 0 and dc == 0:
+                    continue
+                nb = (r + dr, c + dc)
+                if (0 <= nb[0] < skel.shape[0] and 0 <= nb[1] < skel.shape[1]
+                        and skel[nb] and nb not in parent):
+                    parent[nb] = p
+                    q.append(nb)
+    if goal not in parent:
+        return np.argwhere(skel > 0)
+    path: list = []
+    p = goal
+    while p is not None:
+        path.append(p)
+        p = parent[p]
+    return np.array(path[::-1], dtype=np.float32)
+
+
+def _smooth_path(path: np.ndarray, window: int) -> np.ndarray:
+    w = max(3, int(window) | 1)
+    if len(path) < w:
+        return path
+    pad = w // 2
+    padded = np.pad(path.astype(np.float32), ((pad, pad), (0, 0)), mode="edge")
+    ker = np.ones(w, dtype=np.float32) / w
+    out = np.stack([np.convolve(padded[:, i], ker, "valid") for i in range(2)], axis=1)
+    out[0] = path[0]; out[-1] = path[-1]
+    return out
+
+
+def clean_component_to_path(comp255: np.ndarray, smooth_window: int) -> np.ndarray:
+    """Replace a multi-branch component with its smoothed dominant 2-tip path."""
+    skel = _skeletonize(comp255 > 0).astype(np.uint8)
+    skel_pts = np.argwhere(skel)
+    if len(skel_pts) < 3:
+        return comp255
+    eps = _skel_endpoints(skel)
+    if len(eps) <= 2:
+        return comp255  # already simple — leave untouched
+    # find most-distant endpoint pair
+    best_a = eps[0]; best_b = eps[1]; best_d2 = 0
+    for i, a in enumerate(eps):
+        for b in eps[i + 1:]:
+            d2 = (a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2
+            if d2 > best_d2:
+                best_d2, best_a, best_b = d2, a, b
+    path = _bfs_path(skel, best_a, best_b)
+    if len(path) < 2:
+        return comp255
+    if smooth_window > 1:
+        path = _smooth_path(path, smooth_window)
+    # estimate original width from area / skeleton length
+    skel_len = max(1, len(skel_pts))
+    thickness = max(1, int(round(int(comp255.astype(bool).sum()) / skel_len)))
+    out = np.zeros_like(comp255)
+    pts_xy = np.round(path[:, ::-1]).astype(np.int32)
+    cv2.polylines(out, [pts_xy.reshape(-1, 1, 2)], False, 255, thickness, cv2.LINE_8)
+    return out
+
+
+def clean_all_components(mask255: np.ndarray, smooth_window: int) -> np.ndarray:
+    n, labels = cv2.connectedComponents((mask255 > 0).astype(np.uint8), connectivity=8)
+    out = np.zeros_like(mask255)
+    for i in range(1, n):
+        comp = ((labels == i).astype(np.uint8) * 255)
+        out = cv2.bitwise_or(out, clean_component_to_path(comp, smooth_window))
+    return out
+
+
 def process_branch(mask255: np.ndarray, angle_deg: float, args: argparse.Namespace) -> np.ndarray:
     out = remove_small_components(mask255, args.min_component_area)
     if args.line_close_len > 1 and args.line_close_iters > 0:
         ker = line_kernel(args.line_close_len, angle_deg)
         out = cv2.morphologyEx(out, cv2.MORPH_CLOSE, ker, iterations=int(args.line_close_iters))
     out = remove_small_components(out, args.min_component_area)
+    if args.clean_to_path:
+        out = clean_all_components(out, args.clean_smooth_win)
     return bool255(out)
 
 
