@@ -769,10 +769,19 @@ def _evaluate_tip_pair(
     min_inward_opposition = float(thr.get("min_inward_opposition", 0.60))
     max_line_residual     = float(thr.get("max_line_residual_px",  8.0))
 
-    if forward_base < min_forward_cos or forward_tar < min_forward_cos:
-        return reject("forward_cos")
-    if (-inward_opposition) < min_inward_opposition:
-        return reject("opposition")
+    # Clear-merge fast path: adjacent tips from different orientation bins have
+    # tip directions pointing along their own bin angle, not toward the bridge.
+    # For dist <= threshold we bypass forward/opposition and score with high
+    # priority (negative scalar) so these always merge before longer gaps.
+    _cm_max_dist  = float(thr.get("clear_merge_max_dist_px",   0.0))
+    _cm_max_resid = float(thr.get("clear_merge_max_line_resid_px", 4.0))
+    _is_clear = _cm_max_dist > 0.0 and dist <= _cm_max_dist and line_resid <= _cm_max_resid
+
+    if not _is_clear:
+        if forward_base < min_forward_cos or forward_tar < min_forward_cos:
+            return reject("forward_cos")
+        if (-inward_opposition) < min_inward_opposition:
+            return reject("opposition")
     if width_ratio > float(thr.get("max_width_ratio", 3.0)):
         return reject("width_ratio")
     if line_resid > max_line_residual:
@@ -829,18 +838,23 @@ def _evaluate_tip_pair(
     _log_row(rec)
 
     max_curv_delta = float(thr.get("max_curvature_delta", 0.15))
-    score_scalar = (
-        float(wgt.get("distance",          1.0)) * (dist / max(1.0, max_tip_dist))
-        + float(wgt.get("forward",         1.2)) * ((1.0 - forward_base) + (1.0 - forward_tar))
-        + float(wgt.get("opposition",      1.0)) * (1.0 + inward_opposition)
-        + float(wgt.get("line_residual",   0.9)) * (line_resid / max(1.0, max_line_residual))
-        + float(wgt.get("width_ratio",     0.5)) * math.log(max(1.0, width_ratio))
-        + float(wgt.get("curvature_delta", 0.5)) * (curv_delta / max(1e-6, max_curv_delta))
-        + float(wgt.get("smooth_rms",      1.2)) * (smooth_rms / max(1e-6, float(thr.get("max_smooth_rms_px", 3.5))))
-        + float(wgt.get("smooth_curvature",0.5)) * smooth_curv
-        + float(wgt.get("bridge_intrusion",1.5)) * intrusion_frac
-        - float(wgt.get("length_reward",   0.02)) * math.log1p(max(base.skel_len, tar.skel_len))
-    )
+    if _is_clear:
+        # Priority score: always beats normal merges; distance still differentiates
+        # within the clear-merge tier.
+        score_scalar = -10.0 + float(wgt.get("distance", 1.0)) * (dist / max(1.0, _cm_max_dist))
+    else:
+        score_scalar = (
+            float(wgt.get("distance",          1.0)) * (dist / max(1.0, max_tip_dist))
+            + float(wgt.get("forward",         1.2)) * ((1.0 - forward_base) + (1.0 - forward_tar))
+            + float(wgt.get("opposition",      1.0)) * (1.0 + inward_opposition)
+            + float(wgt.get("line_residual",   0.9)) * (line_resid / max(1.0, max_line_residual))
+            + float(wgt.get("width_ratio",     0.5)) * math.log(max(1.0, width_ratio))
+            + float(wgt.get("curvature_delta", 0.5)) * (curv_delta / max(1e-6, max_curv_delta))
+            + float(wgt.get("smooth_rms",      1.2)) * (smooth_rms / max(1e-6, float(thr.get("max_smooth_rms_px", 3.5))))
+            + float(wgt.get("smooth_curvature",0.5)) * smooth_curv
+            + float(wgt.get("bridge_intrusion",1.5)) * intrusion_frac
+            - float(wgt.get("length_reward",   0.02)) * math.log1p(max(base.skel_len, tar.skel_len))
+        )
 
     metrics = {
         "dist": dist, "forward_base": forward_base, "forward_tar": forward_tar,

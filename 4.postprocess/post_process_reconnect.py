@@ -160,6 +160,7 @@ def render_path(label_img: np.ndarray, path: np.ndarray, label_id: int, thicknes
         cv2.polylines(label_img, [pts.reshape(-1, 1, 2)], False, int(label_id), int(thickness), cv2.LINE_8)
 
 
+
 def split_pieces(lbl: np.ndarray) -> list[Piece]:
     pieces: list[Piece] = []
     nid = 1
@@ -285,9 +286,10 @@ def main() -> None:
     kept = [p for p in pieces if not p.dropped and p.skel_len >= args.min_keep_len]
     kept.sort(key=lambda p: (-p.skel_len, -p.area, p.new_id))
     for out_id, p in enumerate(kept, start=1):
-        path = smooth_path(dominant_path(p.mask), args.smooth_window)
         tmp = np.zeros_like(out)
-        render_path(tmp, path, out_id, args.thicken_px)
+        for submask in [p.mask]:
+            path = smooth_path(dominant_path(submask), args.smooth_window)
+            render_path(tmp, path, out_id, args.thicken_px)
         out[np.logical_and(tmp > 0, out == 0)] = out_id
 
     base = src_label.stem.replace("_reconnect_labels", "")

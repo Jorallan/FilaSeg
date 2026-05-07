@@ -18,7 +18,7 @@ from skimage.segmentation import find_boundaries
 
 LABEL_PRIORITY  = ["*_post_labels.tif", "*_reconnect_labels.tif", "*_labels.tif", "*.tif"]
 BG_PRIORITY     = ["*_original.*", "*_post_overlay.png", "*_reconnect_overlay.png", "*_overlay.png", "*_preview.png"]
-DEFAULT_INPUT = Path(r"c:\Repos\filaments_quantification\output\full_pipeline\sem_full_00008_mask255_crop_20260505_151427\final")
+DEFAULT_INPUT = Path(r"c:\Repos\filaments_quantification\output\full_pipeline\sem_full_00008_mask255_crop_20260507_114141\final")
 
 
 def find_first(folder: Path, patterns: list[str]) -> Path | None:
@@ -97,6 +97,12 @@ def prompt_for_folder(default: Path | None = None) -> Path:
     raise ValueError("No input folder provided.")
 
 
+def display_name_for_folder(folder: Path) -> str:
+    if folder.name.lower() in {"final", "3.reconnect", "4.postprocess"} and folder.parent.name:
+        return f"{folder.parent.name}/{folder.name}"
+    return folder.name
+
+
 def parse_args() -> argparse.Namespace:
     ap = argparse.ArgumentParser(description="Interactive label viewer (reconnect / postprocess / final).")
     ap.add_argument("--input", type=Path, default=None, help="Folder containing a labels TIFF and a background image.")
@@ -141,7 +147,8 @@ def main() -> None:
     state = {"hover": None, "sel": None, "locked": False, "outline": True, "info": True,
              "dim": float(args.dim_bg), "gain": float(args.brighten_gain), "alpha": float(args.overlay_alpha)}
 
-    fig = plt.figure(figsize=(13, 8), num=f"{folder.name} | {lbl_path.name}")
+    display_name = display_name_for_folder(folder)
+    fig = plt.figure(figsize=(13, 8), num=f"{display_name} | {lbl_path.name}")
     gs = fig.add_gridspec(13, 1)
     ax = fig.add_subplot(gs[:10, 0]); ax.set_axis_off()
     ax_alpha = fig.add_subplot(gs[10, 0])
@@ -150,7 +157,7 @@ def main() -> None:
     plt.subplots_adjust(hspace=0.45)
 
     im = ax.imshow(render(bg, lbl, color, None, state["alpha"], state["dim"], state["gain"], state["outline"]), interpolation="nearest")
-    ax.set_title(f"{folder.name} — {len(ids)} ids | hover preview | click lock | rclick/esc clear | n/p step | o outline | i info | s save")
+    ax.set_title(f"{display_name} | {len(ids)} ids | hover preview | click lock | rclick/esc clear | n/p step | o outline | i info | s save")
     info_text = ax.text(0.01, 0.01, "", transform=ax.transAxes, fontsize=10, color="white",
                         ha="left", va="bottom", bbox=dict(facecolor="black", alpha=0.6, pad=4))
 

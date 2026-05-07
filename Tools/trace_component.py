@@ -32,7 +32,7 @@ from skimage import io as skio
 ROOT = Path(__file__).resolve().parents[1]
 
 # Edit these defaults to skip CLI arguments when running directly.
-DEFAULT_RUN = ROOT / "output" / "full_pipeline" / "sem_full_00008_mask255_crop_20260505_151427"
+DEFAULT_RUN = ROOT / "output" / "full_pipeline" / "sem_full_00008_mask255_crop_20260507_105149"
 DEFAULT_STEP = "final"   # "final" | "reconnect" | "postprocess"
 DEFAULT_IDS = [25, 38, 39, 42, 68]
 

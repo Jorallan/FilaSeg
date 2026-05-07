@@ -36,9 +36,9 @@ DEFAULT_RECONNECT_VERSION = "straight"
 DEFAULT_PRE_BIN_THRESHOLD    = 127  # grayscale threshold for binarising branch masks
 DEFAULT_PRE_LINE_CLOSE_LEN   = 4    # oriented closing kernel length (px)
 DEFAULT_PRE_LINE_CLOSE_ITERS = 2    # closing iterations
-DEFAULT_PRE_MIN_COMPONENT    = 4    # drop connected components smaller than this (px)
+DEFAULT_PRE_MIN_COMPONENT    = 10    # drop connected components smaller than this (px)
 DEFAULT_PRE_CLEAN_TO_PATH    = True # reduce multi-tip components to dominant 2-tip path
-DEFAULT_PRE_CLEAN_SMOOTH_WIN = 7    # smoothing window for the dominant path
+DEFAULT_PRE_CLEAN_SMOOTH_WIN = 4    # smoothing window for the dominant path
 
 # ── Postprocess (stage 4) ─────────────────────────────────────────────────
 DEFAULT_THICKEN_PX         = 8    # px to thicken each final bundle centerline
