@@ -348,6 +348,52 @@ def _save_preview_png(path: Path, lbl: np.ndarray):
     skio.imsave(str(path), vis, check_contrast=False)
 
 
+def _save_layered_components(prefix: Path, layers: list[tuple[int, np.ndarray]]) -> dict:
+    layers = [(int(cid), mask.astype(bool)) for cid, mask in layers if mask is not None and np.any(mask)]
+    if not layers:
+        return {"layered_ids": 0, "overlap_pixels": 0, "max_coverage": 0}
+
+    shape = layers[0][1].shape
+    ids, indptr, chunks = [], [0], []
+    coverage = np.zeros(shape[0] * shape[1], dtype=np.uint16)
+    for cid, mask in layers:
+        idx = np.flatnonzero(mask.ravel()).astype(np.uint64)
+        ids.append(cid)
+        chunks.append(idx)
+        indptr.append(indptr[-1] + int(idx.size))
+        coverage[idx.astype(np.intp)] += 1
+
+    np.savez_compressed(
+        str(prefix.with_name(prefix.name + "_multilabel.npz")),
+        shape=np.asarray(shape, dtype=np.int64),
+        ids=np.asarray(ids, dtype=np.int32),
+        indptr=np.asarray(indptr, dtype=np.uint64),
+        indices=np.concatenate(chunks) if chunks else np.array([], dtype=np.uint64),
+    )
+
+    import tifffile
+
+    dtype = np.uint16 if max(ids) <= np.iinfo(np.uint16).max else np.uint32
+    with tifffile.TiffWriter(str(prefix.with_name(prefix.name + "_multilabel.tif")), bigtiff=True) as tif:
+        for cid, mask in layers:
+            page = np.zeros(shape, dtype=dtype)
+            page[mask] = cid
+            tif.write(page, photometric="minisblack")
+    prefix.with_name(prefix.name + "_multilabel_ids.json").write_text(
+        json.dumps({"page_to_id": ids}, indent=2), encoding="utf-8",
+    )
+    skio.imsave(
+        str(prefix.with_name(prefix.name + "_overlap.png")),
+        ((coverage.reshape(shape) > 1).astype(np.uint8) * 255),
+        check_contrast=False,
+    )
+    return {
+        "layered_ids": int(len(ids)),
+        "overlap_pixels": int(np.count_nonzero(coverage > 1)),
+        "max_coverage": int(coverage.max()) if coverage.size else 0,
+    }
+
+
 def _load_width_hint(input_dir: Path) -> float | None:
     """Read filament_width_px written by stringart_tiles.py into the branches folder."""
     for p in (input_dir / "filament_width.json", input_dir.parent / "filament_width.json"):
@@ -533,7 +579,8 @@ def main():
             components = reconnect_components(components, cfg2)
         else:
             components = reconnect_components(components, cfg)
-        lbl = relabel_components(components)
+        lbl, layers = relabel_components(components, return_layers=True)
+        layered_summary = _save_layered_components(output_dir / f"{base}_reconnect", layers)
         lbl_dil = dilate_label_image(lbl, int(morph["dilate_px"])) if lbl is not None else None
         overlay = make_overlay(bg, lbl_dil if lbl_dil is not None else lbl, float(outcfg["overlay_alpha"]))
 
@@ -553,6 +600,9 @@ def main():
             skio.imsave(str(output_dir / f"{base}_reconnect_overlay.png"), overlay, check_contrast=False)
 
         print(f"[reconnect-{args.version}] saved -> {output_dir}")
+        if layered_summary["layered_ids"]:
+            print(f"[reconnect-{args.version}] layered -> ids={layered_summary['layered_ids']} "
+                  f"overlap_px={layered_summary['overlap_pixels']}")
 
         if not args.compare:
             continue

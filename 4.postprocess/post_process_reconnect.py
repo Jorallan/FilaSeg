@@ -82,6 +82,69 @@ def read_rgb(path: Path, shape: tuple[int, int]) -> np.ndarray:
     return np.clip(img * 255.0, 0, 255).astype(np.uint8)
 
 
+def load_layered_components(path: Path, shape: tuple[int, int]) -> list[tuple[int, np.ndarray]]:
+    data = np.load(str(path))
+    saved_shape = tuple(int(v) for v in data["shape"])
+    if saved_shape != tuple(shape):
+        raise ValueError(f"Layered component shape {saved_shape} does not match labels {shape}")
+    ids = data["ids"].astype(np.int64)
+    indptr = data["indptr"].astype(np.int64)
+    indices = data["indices"].astype(np.int64)
+    layers = []
+    for i, cid in enumerate(ids):
+        mask = np.zeros(shape[0] * shape[1], dtype=bool)
+        mask[indices[indptr[i]:indptr[i + 1]]] = True
+        if np.any(mask):
+            layers.append((int(cid), mask.reshape(shape)))
+    return layers
+
+
+def save_layered_components(prefix: Path, layers: list[tuple[int, np.ndarray]]) -> dict:
+    layers = [(int(cid), mask.astype(bool)) for cid, mask in layers if mask is not None and np.any(mask)]
+    if not layers:
+        return {"layered_ids": 0, "overlap_pixels": 0, "max_coverage": 0}
+
+    shape = layers[0][1].shape
+    ids, indptr, chunks = [], [0], []
+    coverage = np.zeros(shape[0] * shape[1], dtype=np.uint16)
+    for cid, mask in layers:
+        idx = np.flatnonzero(mask.ravel()).astype(np.uint64)
+        ids.append(cid)
+        chunks.append(idx)
+        indptr.append(indptr[-1] + int(idx.size))
+        coverage[idx.astype(np.intp)] += 1
+
+    np.savez_compressed(
+        str(prefix.with_name(prefix.name + "_multilabel.npz")),
+        shape=np.asarray(shape, dtype=np.int64),
+        ids=np.asarray(ids, dtype=np.int32),
+        indptr=np.asarray(indptr, dtype=np.uint64),
+        indices=np.concatenate(chunks) if chunks else np.array([], dtype=np.uint64),
+    )
+
+    import tifffile
+
+    dtype = np.uint16 if max(ids) <= np.iinfo(np.uint16).max else np.uint32
+    with tifffile.TiffWriter(str(prefix.with_name(prefix.name + "_multilabel.tif")), bigtiff=True) as tif:
+        for cid, mask in layers:
+            page = np.zeros(shape, dtype=dtype)
+            page[mask] = cid
+            tif.write(page, photometric="minisblack")
+    prefix.with_name(prefix.name + "_multilabel_ids.json").write_text(
+        json.dumps({"page_to_id": ids}, indent=2), encoding="utf-8",
+    )
+    skio.imsave(
+        str(prefix.with_name(prefix.name + "_overlap.png")),
+        ((coverage.reshape(shape) > 1).astype(np.uint8) * 255),
+        check_contrast=False,
+    )
+    return {
+        "layered_ids": int(len(ids)),
+        "overlap_pixels": int(np.count_nonzero(coverage > 1)),
+        "max_coverage": int(coverage.max()) if coverage.size else 0,
+    }
+
+
 def endpoints(skel: np.ndarray) -> list[tuple[int, int]]:
     k = np.ones((3, 3), np.uint8)
     k[1, 1] = 0
@@ -166,6 +229,20 @@ def split_pieces(lbl: np.ndarray) -> list[Piece]:
     nid = 1
     for src_id in [int(v) for v in np.unique(lbl) if v]:
         cc = cc_label(lbl == src_id, connectivity=2)
+        for k in range(1, int(cc.max()) + 1):
+            m = cc == k
+            if not np.any(m):
+                continue
+            pieces.append(Piece(src_id, nid, m, int(np.count_nonzero(skeletonize(m))), int(m.sum())))
+            nid += 1
+    return pieces
+
+
+def split_pieces_from_layers(layers: list[tuple[int, np.ndarray]]) -> list[Piece]:
+    pieces: list[Piece] = []
+    nid = 1
+    for src_id, layer_mask in layers:
+        cc = cc_label(layer_mask, connectivity=2)
         for k in range(1, int(cc.max()) + 1):
             m = cc == k
             if not np.any(m):
@@ -278,11 +355,17 @@ def main() -> None:
 
     src_label = find_label_file(args.input)
     lbl = skio.imread(str(src_label)).astype(np.int32)
-    pieces = split_pieces(lbl)
+    base = src_label.stem.replace("_reconnect_labels", "")
+    layered_src = args.input / f"{base}_reconnect_multilabel.npz"
+    if layered_src.exists():
+        pieces = split_pieces_from_layers(load_layered_components(layered_src, lbl.shape))
+    else:
+        pieces = split_pieces(lbl)
     same_source_merged = bridge_same_source_pieces(pieces, args.same_source_bridge_radius)
     absorb_small_pieces(pieces, args.absorb_radius, args.absorb_len, args.min_keep_len)
 
     out = np.zeros(lbl.shape, dtype=np.uint16)
+    layered_out: list[tuple[int, np.ndarray]] = []
     kept = [p for p in pieces if not p.dropped and p.skel_len >= args.min_keep_len]
     kept.sort(key=lambda p: (-p.skel_len, -p.area, p.new_id))
     for out_id, p in enumerate(kept, start=1):
@@ -290,9 +373,12 @@ def main() -> None:
         for submask in [p.mask]:
             path = smooth_path(dominant_path(submask), args.smooth_window)
             render_path(tmp, path, out_id, args.thicken_px)
-        out[np.logical_and(tmp > 0, out == 0)] = out_id
+        layer = tmp > 0
+        if np.any(layer):
+            layered_out.append((out_id, layer.copy()))
+            out[np.logical_and(layer, out == 0)] = out_id
 
-    base = src_label.stem.replace("_reconnect_labels", "")
+    layered_summary = save_layered_components(args.output / f"{base}_post", layered_out)
     skio.imsave(str(args.output / f"{base}_post_labels.tif"), out.astype(np.uint16), check_contrast=False)
     skio.imsave(str(args.output / f"{base}_post_labels_preview.png"), colorize(out), check_contrast=False)
     if args.background.exists():
@@ -305,6 +391,7 @@ def main() -> None:
 
     summary = {
         "source": str(src_label),
+        "source_multilabel": str(layered_src) if layered_src.exists() else None,
         "raw_labels": int(len([v for v in np.unique(lbl) if v])),
         "pieces_after_split": len(pieces),
         "same_source_merged_pieces": int(same_source_merged),
@@ -315,6 +402,7 @@ def main() -> None:
         "thicken_px": int(args.thicken_px),
         "smooth_window": int(args.smooth_window),
         "same_source_bridge_radius": int(args.same_source_bridge_radius),
+        **layered_summary,
     }
     (args.output / "post_process_summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
     print(json.dumps(summary, indent=2))

@@ -551,11 +551,12 @@ def extract_components(
     return comps, cid
 
 
-def relabel_components(components: List[Component]) -> np.ndarray:
+def relabel_components(components: List[Component], return_layers: bool = False):
     if not components:
-        return None
+        return (None, []) if return_layers else None
     shape = components[0].mask.shape
     out = np.zeros(shape, dtype=np.int32)
+    layers = []
     new_id = 1
     alive = sorted(
         [c for c in components if c.exist],
@@ -565,8 +566,10 @@ def relabel_components(components: List[Component]) -> np.ndarray:
         fill = np.logical_and(c.mask, out == 0)
         if np.any(fill):
             out[fill] = new_id
+            if return_layers:
+                layers.append((new_id, c.mask.copy()))
             new_id += 1
-    return out
+    return (out, layers) if return_layers else out
 
 
 def dilate_label_image(lbl: np.ndarray, dilate_px: int) -> np.ndarray:

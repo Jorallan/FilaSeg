@@ -21,6 +21,10 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--output", type=Path, default=None, help="Output folder; defaults beside the mask.")
     ap.add_argument("--suffix", default="_crop", help="Suffix added before each output extension.")
     ap.add_argument("--max-display", type=int, default=1200, help="Largest display dimension in pixels.")
+    ap.add_argument("--tile-snap", type=int, default=128,
+                    help="Snap crop origin and size to multiples of this value (default 128 to "
+                         "match stringart's TILE_SIZE). Off-grid crops diverge from the same "
+                         "region of the full-image run by ~15%% IoU; aligning fixes this. Set 0 to disable.")
     return ap.parse_args()
 
 
@@ -103,6 +107,26 @@ def clamp_roi(roi: tuple[int, int, int, int], width: int, height: int) -> tuple[
     return x, y, w, h
 
 
+def snap_to_tile(roi: tuple[int, int, int, int], tile: int,
+                 width: int, height: int) -> tuple[int, int, int, int]:
+    """Snap origin and size of an ROI to multiples of `tile`. Falls back to the
+    original ROI if the snapped region would not fit inside the image."""
+    if tile <= 1:
+        return roi
+    x, y, w, h = roi
+    sx = (x // tile) * tile
+    sy = (y // tile) * tile
+    sw = max(tile, ((w + tile - 1) // tile) * tile)
+    sh = max(tile, ((h + tile - 1) // tile) * tile)
+    if sx + sw > width:
+        sw = (width - sx) // tile * tile
+    if sy + sh > height:
+        sh = (height - sy) // tile * tile
+    if sw < tile or sh < tile:
+        return roi
+    return sx, sy, sw, sh
+
+
 def out_path(src: Path, out_dir: Path, suffix: str) -> Path:
     return out_dir / f"{src.stem}{suffix}{src.suffix}"
 
@@ -116,6 +140,11 @@ def main() -> None:
         raise ValueError(f"Shape mismatch: mask {mask.shape[:2]} vs overlay {overlay.shape[:2]}")
 
     x, y, w, h = clamp_roi(select_roi(mask, overlay, args.max_display), overlay.shape[1], overlay.shape[0])
+    if args.tile_snap and args.tile_snap > 1:
+        sx, sy, sw, sh = snap_to_tile((x, y, w, h), args.tile_snap, overlay.shape[1], overlay.shape[0])
+        if (sx, sy, sw, sh) != (x, y, w, h):
+            print(f"[tile-snap={args.tile_snap}] ({x},{y},{w}x{h}) -> ({sx},{sy},{sw}x{sh})")
+            x, y, w, h = sx, sy, sw, sh
 
     out_dir = args.output or (args.mask.parent / "crops")
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -132,6 +161,7 @@ def main() -> None:
         "y": y,
         "width": w,
         "height": h,
+        "tile_snap": int(args.tile_snap),
         "mask_crop": str(mask_out),
         "overlay_crop": str(overlay_out),
     }

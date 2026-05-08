@@ -40,7 +40,17 @@ CONFIG: Dict[str, Any] = {
 
     # --- Tiling / binning ---
     "TILE_SIZE":       128,   # tile width/height in px; smaller = more local fits, more seams
-    "ANGLE_STEP_DEG":  15,   # angle-bin width over [0°,180°); smaller = more bins
+    "ANGLE_STEP_DEG":  15,    # angle-bin width over [0°,180°); smaller = more bins
+    # Multi-grid voting: list of [oy, ox] tile-grid origins (in px). The image is
+    # processed once per offset; per-orientation branches are aggregated via
+    # majority voting (a pixel is kept if it appears in >= TILE_GRID_VOTE_MIN of
+    # the grids). This makes the result almost insensitive to where the tile grid
+    # lies and rejects single-grid noise. Default [[0,0]] is single-grid (same as
+    # before). Try [[0,0],[64,64]] for 2-grid (vote_min=1) or
+    # [[0,0],[64,0],[0,64],[64,64]] for 4-grid (vote_min=2 recommended). Cost is
+    # ~Nx the stringart stage where N = len(offsets).
+    "TILE_GRID_OFFSETS":  [[0,0],[64,0],[0,64],[64,64]],
+    "TILE_GRID_VOTE_MIN": 1,    # 1 = OR (any grid lights it). 2+ = majority/strict.
 
     # --- Preprocessing ---
     "USE_SKELETONIZE":    False,  # thin to ~1 px centerlines before Hough
@@ -149,6 +159,13 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--no-skeletonize", action="store_false", dest="use_skeletonize")
     ap.add_argument("--auto-scale", action="store_true", default=None)
     ap.add_argument("--no-auto-scale", action="store_false", dest="auto_scale")
+    ap.add_argument("--tile-grid-offsets", type=str, default=None,
+                    help='JSON list of [oy,ox] tile-grid origins for multi-grid voting, '
+                         'e.g. "[[0,0],[64,64]]" or "[[0,0],[64,0],[0,64],[64,64]]". '
+                         'Default single-grid: [[0,0]].')
+    ap.add_argument("--tile-grid-vote-min", type=int, default=None,
+                    help="Min number of grids a pixel must appear in to be kept. "
+                         "1 = OR (any grid). 2+ = strict (rejects single-grid noise).")
     return ap.parse_args()
 
 
@@ -175,6 +192,11 @@ def apply_cli_overrides(args: argparse.Namespace) -> None:
         val = getattr(args, arg_name)
         if val is not None:
             CONFIG[cfg_name] = val
+    if getattr(args, "tile_grid_offsets", None):
+        import json as _json
+        CONFIG["TILE_GRID_OFFSETS"] = _json.loads(args.tile_grid_offsets)
+    if getattr(args, "tile_grid_vote_min", None) is not None:
+        CONFIG["TILE_GRID_VOTE_MIN"] = int(args.tile_grid_vote_min)
 
 
 # ============================================================
@@ -536,6 +558,68 @@ def process_image_tiled(
     return recon_full, recon_thin_full, branches_full, tile_stats, bins
 
 
+def process_image_multigrid(
+    img_bin255: np.ndarray,
+    runtime_params: Optional[Dict[str, Any]] = None,
+):
+    """Run process_image_tiled at each offset in TILE_GRID_OFFSETS and OR the
+    per-orientation branches. Padding shifts the tile grid relative to the image,
+    so features near a boundary in one grid land in the interior of another.
+    Returns the same 5-tuple as process_image_tiled; tile_stats are concatenated.
+    """
+    offsets = CONFIG.get("TILE_GRID_OFFSETS") or [[0, 0]]
+    # Sanity: clamp offsets to [0, TILE_SIZE) and de-dup
+    tsz = int(CONFIG["TILE_SIZE"])
+    seen = set()
+    norm: List[Tuple[int, int]] = []
+    for oy, ox in offsets:
+        key = (int(oy) % tsz, int(ox) % tsz)
+        if key not in seen:
+            seen.add(key)
+            norm.append(key)
+    if len(norm) == 1 and norm[0] == (0, 0):
+        return process_image_tiled(img_bin255, runtime_params)
+
+    vote_min = max(1, int(CONFIG.get("TILE_GRID_VOTE_MIN", 1)))
+    vote_min = min(vote_min, len(norm))   # cap at number of grids
+
+    h, w = img_bin255.shape
+    # Vote counters (uint8 large enough for typical N <= 16 grids)
+    recon_votes  = np.zeros((h, w), dtype=np.uint8)
+    thin_votes   = np.zeros((h, w), dtype=np.uint8)
+    branch_votes: Optional[List[np.ndarray]] = None
+    all_stats: List[dict] = []
+    bins_out = None
+
+    for oy, ox in norm:
+        if oy == 0 and ox == 0:
+            shifted = img_bin255
+        else:
+            shifted = cv2.copyMakeBorder(img_bin255, oy, 0, ox, 0, cv2.BORDER_CONSTANT, value=0)
+        recon, thin, branches, stats_list, bins_out = process_image_tiled(shifted, runtime_params)
+        if oy or ox:
+            recon    = recon[oy:oy + h, ox:ox + w]
+            thin     = thin[oy:oy + h, ox:ox + w]
+            branches = [b[oy:oy + h, ox:ox + w] for b in branches]
+        recon_votes += (recon > 0).astype(np.uint8)
+        thin_votes  += (thin  > 0).astype(np.uint8)
+        if branch_votes is None:
+            branch_votes = [(b > 0).astype(np.uint8) for b in branches]
+        else:
+            for i, b in enumerate(branches):
+                branch_votes[i] += (b > 0).astype(np.uint8)
+        for s in stats_list:
+            s = dict(s); s["grid_offset_yx"] = [int(oy), int(ox)]
+            all_stats.append(s)
+
+    accum_recon = ((recon_votes >= vote_min).astype(np.uint8)) * 255
+    accum_thin  = ((thin_votes  >= vote_min).astype(np.uint8)) * 255
+    accum_branches = [((bv >= vote_min).astype(np.uint8)) * 255 for bv in (branch_votes or [])]
+
+    print(f"[multigrid] tile_size={tsz}  offsets={norm}  ({len(norm)} grids, vote_min={vote_min})")
+    return accum_recon, accum_thin, accum_branches, all_stats, bins_out
+
+
 # ============================================================
 # Optional overlay visualisation
 # ============================================================
@@ -845,7 +929,7 @@ def main() -> None:
     ensure_dir(branches_dir)
 
     # --- run ---
-    recon, recon_thin, branches, tile_stats, bins = process_image_tiled(img_bin, runtime_params)
+    recon, recon_thin, branches, tile_stats, bins = process_image_multigrid(img_bin, runtime_params)
 
     # Mask out removed blobs from recon/branches (if intersection removal was used)
     if blobs is not None:
