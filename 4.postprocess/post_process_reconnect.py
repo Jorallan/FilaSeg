@@ -9,7 +9,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-from scipy.ndimage import binary_dilation, convolve
+from scipy.ndimage import binary_dilation, convolve, distance_transform_edt
 from skimage import io as skio
 from skimage.measure import label as cc_label
 from skimage.morphology import skeletonize
@@ -30,6 +30,9 @@ DEFAULT_ABSORB_LEN              = 28   # absorb bundles shorter than this into a
 DEFAULT_ABSORB_RADIUS           = 5    # halo radius (px) for neighbour detection during absorb
 DEFAULT_SAME_SOURCE_BRIDGE_RADIUS = 12 # merge disconnected pieces sharing the same source label within this radius
 DEFAULT_OVERLAY_ALPHA           = 0.72 # blend weight for the coloured overlay (0 = background only, 1 = labels only)
+# ── Overlap absorb / endpoint trim (after thickening) ─────────────────────
+DEFAULT_OVERLAP_ABSORB_THR      = 0.0   # 0 = disabled. >=0.5 absorbs near-duplicate IDs into the larger.
+DEFAULT_TIP_TRIM_FRAC           = 0.0   # 0 = disabled. ~0.15 trims overlap pixels at an ID's skeleton tip.
 # ─────────────────────────────────────────────────────────────────────────
 
 
@@ -57,6 +60,13 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--absorb-radius", type=int, default=DEFAULT_ABSORB_RADIUS)
     ap.add_argument("--same-source-bridge-radius", type=int, default=DEFAULT_SAME_SOURCE_BRIDGE_RADIUS)
     ap.add_argument("--overlay-alpha", type=float, default=DEFAULT_OVERLAY_ALPHA)
+    ap.add_argument("--overlap-absorb-thr", type=float, default=DEFAULT_OVERLAP_ABSORB_THR,
+                    help="Pairs whose intersection covers >= this fraction of the smaller mask are merged "
+                         "into the larger. 0 disables. Try 0.6-0.7.")
+    ap.add_argument("--tip-trim-frac", type=float, default=DEFAULT_TIP_TRIM_FRAC,
+                    help="If overlap pixels of A∩B sit within this fraction of A's skeleton-tip distance, "
+                         "erase them from A so it 'merges into' B without redundant overlap. 0 disables. "
+                         "Try 0.15.")
     ap.add_argument("--no-copy-source", action="store_true")
     return ap.parse_args()
 
@@ -334,6 +344,126 @@ def absorb_small_pieces(pieces: list[Piece], radius: int, absorb_len: int, min_k
             p.dropped = True
 
 
+def _bbox(mask: np.ndarray) -> tuple[int, int, int, int]:
+    rows = np.any(mask, axis=1)
+    cols = np.any(mask, axis=0)
+    if not rows.any():
+        return 0, 0, 0, 0
+    r0, r1 = int(np.argmax(rows)), int(len(rows) - 1 - np.argmax(rows[::-1]))
+    c0, c1 = int(np.argmax(cols)), int(len(cols) - 1 - np.argmax(cols[::-1]))
+    return r0, r1, c0, c1
+
+
+def _bbox_intersects(a: tuple[int, int, int, int], b: tuple[int, int, int, int]) -> bool:
+    return not (a[1] < b[0] or b[1] < a[0] or a[3] < b[2] or b[3] < a[2])
+
+
+def absorb_overlapping_layers(
+    layers: list[tuple[int, np.ndarray]], thr: float
+) -> tuple[list[tuple[int, np.ndarray]], list[tuple[int, int, float]]]:
+    """Merge pairs whose intersection covers >= thr of the smaller mask.
+
+    Operates on rendered (thickened) per-piece masks, where duplicate-bundle
+    overlap actually appears -- reconnect's component-level overlap-kill cannot
+    see this because it runs before postprocess thickening.
+    """
+    if thr <= 0 or len(layers) < 2:
+        return layers, []
+    work = sorted(layers, key=lambda x: -int(x[1].sum()))
+    n = len(work)
+    bboxes = [_bbox(m) for _, m in work]
+    areas = [int(m.sum()) for _, m in work]
+    dropped = [False] * n
+    log: list[tuple[int, int, float]] = []   # (absorbed_id, into_id, ratio)
+    for i in range(n):
+        if dropped[i]:
+            continue
+        for j in range(i + 1, n):
+            if dropped[j]:
+                continue
+            if not _bbox_intersects(bboxes[i], bboxes[j]):
+                continue
+            inter = int(np.logical_and(work[i][1], work[j][1]).sum())
+            if inter == 0:
+                continue
+            ratio = inter / max(1, min(areas[i], areas[j]))   # vs the smaller
+            if ratio < thr:
+                continue
+            # j is smaller (sorted descending). Absorb j into i.
+            merged = np.logical_or(work[i][1], work[j][1])
+            work[i] = (work[i][0], merged)
+            bboxes[i] = _bbox(merged)
+            areas[i] = int(merged.sum())
+            dropped[j] = True
+            log.append((work[j][0], work[i][0], ratio))
+    out = [work[k] for k in range(n) if not dropped[k]]
+    return out, log
+
+
+def trim_endpoint_overlaps(
+    layers: list[tuple[int, np.ndarray]], tip_frac: float
+) -> tuple[list[tuple[int, np.ndarray]], int]:
+    """For overlap pixels of A∩B that sit within tip_frac of A's skeleton tip,
+    erase them from A's mask so A 'merges into' B without redundant overlap.
+
+    Mid-bundle overlaps (legitimate crossings) are preserved -- only overlap
+    pixels in the tip neighbourhood are removed.
+    """
+    if tip_frac <= 0 or len(layers) < 2:
+        return layers, 0
+    masks = [m.copy() for _, m in layers]
+    ids = [cid for cid, _ in layers]
+    bboxes = [_bbox(m) for m in masks]
+    n = len(masks)
+
+    # Per-id tip-distance map and tip neighbourhood radius
+    tip_info: list[tuple[np.ndarray, float] | None] = []
+    for m in masks:
+        sk = skeletonize(m)
+        if int(sk.sum()) < 4:
+            tip_info.append(None)
+            continue
+        nb = convolve(sk.astype(np.uint8),
+                      np.array([[1, 1, 1], [1, 0, 1], [1, 1, 1]], np.uint8),
+                      mode="constant")
+        eps = np.argwhere(sk & (nb == 1))
+        if len(eps) < 1:
+            tip_info.append(None)
+            continue
+        seed = np.zeros(m.shape, dtype=bool)
+        seed[eps[:, 0], eps[:, 1]] = True
+        d = distance_transform_edt(~seed)
+        skel_len = int(sk.sum())
+        radius = max(8.0, float(tip_frac) * float(skel_len))
+        tip_info.append((d, radius))
+
+    trimmed_total = 0
+    for i in range(n):
+        info_i = tip_info[i]
+        if info_i is None:
+            continue
+        d_i, r_i = info_i
+        for j in range(n):
+            if i == j:
+                continue
+            if not _bbox_intersects(bboxes[i], bboxes[j]):
+                continue
+            inter = np.logical_and(masks[i], masks[j])
+            if not inter.any():
+                continue
+            erase = inter & (d_i <= r_i)
+            if not erase.any():
+                continue
+            # Only trim if the overlap is endpoint-dominant for A (>=50% near A's tip)
+            if int(erase.sum()) * 2 < int(inter.sum()):
+                continue
+            masks[i] = masks[i] & ~erase
+            bboxes[i] = _bbox(masks[i])
+            trimmed_total += int(erase.sum())
+    out = [(ids[k], masks[k]) for k in range(n) if masks[k].any()]
+    return out, trimmed_total
+
+
 def colorize(lbl: np.ndarray) -> np.ndarray:
     lab = lbl.astype(np.int64)
     out = np.zeros((*lab.shape, 3), dtype=np.uint8)
@@ -376,7 +506,23 @@ def main() -> None:
         layer = tmp > 0
         if np.any(layer):
             layered_out.append((out_id, layer.copy()))
-            out[np.logical_and(layer, out == 0)] = out_id
+
+    # Optional cleanup passes operating on the rendered (thickened) layers.
+    # Order matters: absorption first (eliminates near-duplicate IDs entirely),
+    # then endpoint trim (cleans residual tip overlaps where small ID merges into big).
+    overlap_absorb_log: list[tuple[int, int, float]] = []
+    if args.overlap_absorb_thr > 0:
+        layered_out, overlap_absorb_log = absorb_overlapping_layers(layered_out, float(args.overlap_absorb_thr))
+    tip_trim_pixels = 0
+    if args.tip_trim_frac > 0:
+        layered_out, tip_trim_pixels = trim_endpoint_overlaps(layered_out, float(args.tip_trim_frac))
+
+    # Flatten layered_out into the final label image. Layers are already in
+    # priority order (longest first); first-write-wins preserves "longer-bundle
+    # owns the disputed pixel".
+    out[:] = 0
+    for cid, layer in layered_out:
+        out[np.logical_and(layer, out == 0)] = cid
 
     layered_summary = save_layered_components(args.output / f"{base}_post", layered_out)
     skio.imsave(str(args.output / f"{base}_post_labels.tif"), out.astype(np.uint16), check_contrast=False)
@@ -395,13 +541,22 @@ def main() -> None:
         "raw_labels": int(len([v for v in np.unique(lbl) if v])),
         "pieces_after_split": len(pieces),
         "same_source_merged_pieces": int(same_source_merged),
-        "kept_labels": int(out.max()),
+        "kept_labels": int(len([v for v in np.unique(out) if v])),
+        "max_label_id": int(out.max()),
         "absorbed_pieces": int(sum(p.absorbed_into is not None for p in pieces)),
         "same_source_absorbed_pieces": int(sum(p.same_source_into is not None for p in pieces)),
         "dropped_pieces": int(sum(p.dropped and p.absorbed_into is None and p.same_source_into is None for p in pieces)),
         "thicken_px": int(args.thicken_px),
         "smooth_window": int(args.smooth_window),
         "same_source_bridge_radius": int(args.same_source_bridge_radius),
+        "overlap_absorb_thr": float(args.overlap_absorb_thr),
+        "overlap_absorbed_pairs": [
+            {"absorbed_id": int(a), "into_id": int(b), "overlap_ratio": round(float(r), 4)}
+            for a, b, r in overlap_absorb_log
+        ],
+        "overlap_absorbed_count": len(overlap_absorb_log),
+        "tip_trim_frac": float(args.tip_trim_frac),
+        "tip_trim_pixels": int(tip_trim_pixels),
         **layered_summary,
     }
     (args.output / "post_process_summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")

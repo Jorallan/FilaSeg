@@ -9,6 +9,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+from scipy.interpolate import splprep, splev
 from scipy.ndimage import convolve as _conv
 from skimage.morphology import skeletonize as _skeletonize
 
@@ -24,8 +25,11 @@ DEFAULT_BIN_THRESHOLD      = 127  # grayscale threshold for binarising each bran
 DEFAULT_LINE_CLOSE_LEN     = 9    # length of the oriented closing kernel (px); bridges small raster gaps
 DEFAULT_LINE_CLOSE_ITERS   = 1    # how many times to apply the closing
 DEFAULT_MIN_COMPONENT_AREA = 8    # remove connected components smaller than this (px)
-DEFAULT_CLEAN_TO_PATH      = True # reduce each multi-tip component to its dominant 2-tip skeleton path
+DEFAULT_CLEAN_TO_PATH      = True # reduce each component to its smoothed dominant skeleton path
 DEFAULT_CLEAN_SMOOTH_WIN   = 7    # moving-average window applied to the dominant path before redrawing
+DEFAULT_TARGET_WIDTH_PX    = 0    # 0 = use per-branch median width; >0 = render every component at this width
+DEFAULT_FIT_DEGREE         = 2    # 0=skip spline fit (moving-avg only); 1/2/3=parametric B-spline degree
+DEFAULT_FIT_SMOOTHING      = 1.5  # spline smoothing factor multiplier (higher = stiffer, more polynomial-like)
 # ─────────────────────────────────────────────────────────────────────────
 
 
@@ -39,9 +43,16 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--line-close-iters", type=int, default=DEFAULT_LINE_CLOSE_ITERS)
     ap.add_argument("--min-component-area", type=int, default=DEFAULT_MIN_COMPONENT_AREA)
     ap.add_argument("--clean-to-path",    action=argparse.BooleanOptionalAction, default=DEFAULT_CLEAN_TO_PATH,
-                    help="Reduce each multi-tip component to its dominant 2-tip skeleton path.")
+                    help="Reduce every component to its smoothed dominant skeleton path + uniform width.")
     ap.add_argument("--clean-smooth-win", type=int, default=DEFAULT_CLEAN_SMOOTH_WIN,
                     help="Smoothing window for dominant path before redrawing (1 = off).")
+    ap.add_argument("--target-width-px", type=int, default=DEFAULT_TARGET_WIDTH_PX,
+                    help="Target re-render width for all components. 0 = use per-branch median width.")
+    ap.add_argument("--fit-degree", type=int, default=DEFAULT_FIT_DEGREE,
+                    help="Parametric B-spline degree for skeleton smoothing. 0=skip, 1=linear, "
+                         "2=quadratic (default), 3=cubic. Forces each path to a physically meaningful curve.")
+    ap.add_argument("--fit-smoothing", type=float, default=DEFAULT_FIT_SMOOTHING,
+                    help="Spline smoothing factor multiplier (higher = stiffer / more polynomial-like).")
     ap.add_argument("--copy-source", action="store_true", help="Copy raw branch inputs beside output.")
     return ap.parse_args()
 
@@ -152,42 +163,116 @@ def _smooth_path(path: np.ndarray, window: int) -> np.ndarray:
     return out
 
 
-def clean_component_to_path(comp255: np.ndarray, smooth_window: int) -> np.ndarray:
-    """Replace a multi-branch component with its smoothed dominant 2-tip path."""
-    skel = _skeletonize(comp255 > 0).astype(np.uint8)
+def _fit_spline(path: np.ndarray, degree: int, smoothing: float) -> np.ndarray:
+    """Fit a parametric B-spline of given degree through path points.
+
+    Forces the centerline onto a smooth curve up to the specified polynomial
+    order (1=line, 2=quadratic, 3=cubic). Sampled densely along the spline
+    arc, preserving the original endpoints exactly. Falls back to the input
+    path if there aren't enough unique points for the requested degree.
+    """
+    if degree < 1 or len(path) < 2:
+        return path
+    pts = path.astype(np.float64)
+    # de-dup near-coincident points; splprep requires strictly increasing param
+    keep = np.r_[True, np.linalg.norm(np.diff(pts, axis=0), axis=1) > 0.5]
+    pts = pts[keep]
+    k = min(int(degree), max(1, len(pts) - 1))
+    if len(pts) < k + 1:
+        return path
+    s = float(smoothing) * len(pts)
+    try:
+        tck, _ = splprep([pts[:, 0], pts[:, 1]], s=s, k=k)
+    except Exception:
+        return path
+    n_out = max(16, min(len(pts) * 2, 240))
+    u = np.linspace(0.0, 1.0, n_out)
+    fit = np.stack(splev(u, tck), axis=1).astype(np.float32)
+    fit[0]  = path[0]
+    fit[-1] = path[-1]
+    return fit
+
+
+def _dominant_path(skel: np.ndarray) -> np.ndarray | None:
+    """Return a 2-tip path through the skeleton (most-distant endpoint pair),
+    falling back to a PCA axis ordering for ring-like components with no
+    endpoints. Returns None if the component is too small to path-ify."""
     skel_pts = np.argwhere(skel)
     if len(skel_pts) < 3:
-        return comp255
+        return None
     eps = _skel_endpoints(skel)
-    if len(eps) <= 2:
-        return comp255  # already simple — leave untouched
-    # find most-distant endpoint pair
-    best_a = eps[0]; best_b = eps[1]; best_d2 = 0
-    for i, a in enumerate(eps):
-        for b in eps[i + 1:]:
-            d2 = (a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2
-            if d2 > best_d2:
-                best_d2, best_a, best_b = d2, a, b
-    path = _bfs_path(skel, best_a, best_b)
-    if len(path) < 2:
-        return comp255
-    if smooth_window > 1:
-        path = _smooth_path(path, smooth_window)
-    # estimate original width from area / skeleton length
-    skel_len = max(1, len(skel_pts))
-    thickness = max(1, int(round(int(comp255.astype(bool).sum()) / skel_len)))
-    out = np.zeros_like(comp255)
-    pts_xy = np.round(path[:, ::-1]).astype(np.int32)
-    cv2.polylines(out, [pts_xy.reshape(-1, 1, 2)], False, 255, thickness, cv2.LINE_8)
-    return out
+    if len(eps) >= 2:
+        best_a, best_b, best_d2 = eps[0], eps[1], 0
+        for i, a in enumerate(eps):
+            for b in eps[i + 1:]:
+                d2 = (a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2
+                if d2 > best_d2:
+                    best_d2, best_a, best_b = d2, a, b
+        path = _bfs_path(skel, best_a, best_b)
+        return path if len(path) >= 2 else None
+    # 0 or 1 endpoint — order by principal axis projection (rare ring-like case)
+    xy = np.stack([skel_pts[:, 1], skel_pts[:, 0]], axis=1).astype(np.float32)
+    centred = xy - xy.mean(0)
+    axis = np.linalg.eigh(np.cov(centred.T))[1][:, 1]
+    order = np.argsort(centred @ axis)
+    return skel_pts[order].astype(np.float32)
 
 
-def clean_all_components(mask255: np.ndarray, smooth_window: int) -> np.ndarray:
+def smooth_and_normalize(
+    mask255: np.ndarray,
+    smooth_window: int,
+    target_width_px: int,
+    fit_degree: int = 0,
+    fit_smoothing: float = 1.5,
+) -> np.ndarray:
+    """Smooth every connected component and re-render at a uniform width.
+
+    Pipeline per CC:
+      skeletonize → dominant path (handles ring-like via PCA)
+                  → moving-average smooth (if smooth_window > 1)
+                  → parametric B-spline fit at fit_degree (if fit_degree > 0)
+                  → record area/length width
+    Then re-render all paths at a single target width:
+      - target_width_px == 0  →  per-branch median of measured widths
+      - target_width_px  > 0  →  fixed render width
+    Result: each component is a physically-meaningful smooth curve of uniform
+    width, making downstream tip-matching and overlap detection much cleaner.
+    """
     n, labels = cv2.connectedComponents((mask255 > 0).astype(np.uint8), connectivity=8)
-    out = np.zeros_like(mask255)
+    if n <= 1:
+        return mask255
+
+    items: list[tuple[np.ndarray | None, int]] = []
     for i in range(1, n):
-        comp = ((labels == i).astype(np.uint8) * 255)
-        out = cv2.bitwise_or(out, clean_component_to_path(comp, smooth_window))
+        comp = (labels == i)
+        skel = _skeletonize(comp).astype(np.uint8)
+        skel_len = int(skel.sum())
+        path = _dominant_path(skel)
+        if path is None or len(path) < 2 or skel_len < 1:
+            items.append((None, 0))
+            continue
+        if smooth_window > 1:
+            path = _smooth_path(path, smooth_window)
+        if fit_degree > 0:
+            path = _fit_spline(path, fit_degree, fit_smoothing)
+        width = max(1, int(round(int(comp.sum()) / max(1, skel_len))))
+        items.append((path, width))
+
+    widths = [w for _, w in items if w > 0]
+    if not widths:
+        return mask255
+    if target_width_px > 0:
+        target_w = int(target_width_px)
+    else:
+        target_w = int(round(float(np.median(widths))))
+    target_w = max(1, target_w)
+
+    out = np.zeros_like(mask255)
+    for path, w in items:
+        if path is None:
+            continue
+        pts_xy = np.round(path[:, ::-1]).astype(np.int32)
+        cv2.polylines(out, [pts_xy.reshape(-1, 1, 2)], False, 255, target_w, cv2.LINE_8)
     return out
 
 
@@ -198,7 +283,8 @@ def process_branch(mask255: np.ndarray, angle_deg: float, args: argparse.Namespa
         out = cv2.morphologyEx(out, cv2.MORPH_CLOSE, ker, iterations=int(args.line_close_iters))
     out = remove_small_components(out, args.min_component_area)
     if args.clean_to_path:
-        out = clean_all_components(out, args.clean_smooth_win)
+        out = smooth_and_normalize(out, args.clean_smooth_win, args.target_width_px,
+                                   args.fit_degree, args.fit_smoothing)
     return bool255(out)
 
 

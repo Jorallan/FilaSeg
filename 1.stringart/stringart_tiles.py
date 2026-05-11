@@ -49,8 +49,8 @@ CONFIG: Dict[str, Any] = {
     # before). Try [[0,0],[64,64]] for 2-grid (vote_min=1) or
     # [[0,0],[64,0],[0,64],[64,64]] for 4-grid (vote_min=2 recommended). Cost is
     # ~Nx the stringart stage where N = len(offsets).
-    "TILE_GRID_OFFSETS":  [[0,0],[64,0],[0,64],[64,64]],
-    "TILE_GRID_VOTE_MIN": 1,    # 1 = OR (any grid lights it). 2+ = majority/strict.
+    "TILE_GRID_OFFSETS":  [[0, 0], [64, 0], [0, 64], [64, 64]],   # 4-grid voting
+    "TILE_GRID_VOTE_MIN": 2,    # majority: pixel kept if in >= this many grids (rejects single-grid noise)
 
     # --- Preprocessing ---
     "USE_SKELETONIZE":    False,  # thin to ~1 px centerlines before Hough
@@ -376,6 +376,7 @@ def angle_bins(step_deg: int) -> List[Tuple[float, float]]:
         bins.append((a, min(180.0, a + step)))
         a += step
     return bins
+
 
 def draw_line_mask(shape_hw: Tuple[int, int], x1: int, y1: int, x2: int, y2: int, thickness: int) -> np.ndarray:
     m = np.zeros(shape_hw, dtype=np.uint8)

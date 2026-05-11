@@ -9,6 +9,7 @@ Controls:
     3/erase   drag removes pixels; with lock on, only selected IDs are affected
     4/paint   drag adds pixels to active/new ID; with lock on, other IDs are shared
     j         join selected IDs into one cleaned/smoothed ID
+    q         smooth selected ID paths
     l         toggle non-selected-ID protection
     wheel     brush size in edit modes; ctrl+wheel zoom; shift/alt+wheel pan
     n/p       step active ID; u undo; s save to ./modified
@@ -39,7 +40,7 @@ for _key in [k for k in plt.rcParams if k.startswith("keymap.")]:
 
 LABEL_PATTERNS = ["*_manual_labels.tif", "*_post_labels.tif", "*_reconnect_labels.tif", "*_labels.tif", "*.tif"]
 BG_PATTERNS = ["*_original.*", "*_post_overlay.png", "*_reconnect_overlay.png", "*_overlay.png", "*_preview.png"]
-DEFAULT_INPUT = Path(r"C:\Repos\filaments_quantification\output\full_pipeline\sem_full_00000_1p66_crop512\final")
+DEFAULT_INPUT = Path(r"C:\Repos\filaments_quantification\output\full_pipeline\sem00000_crop512_manual")
 PROMPT_FOR_INPUT = False
 SCRIPT_INPUT = DEFAULT_INPUT
 
@@ -262,7 +263,7 @@ def dominant_path(mask: np.ndarray) -> np.ndarray:
     return pts[np.argsort((xy - xy.mean(0)) @ axis)].astype(np.float32)
 
 
-def smooth_path(path: np.ndarray, samples: int = 160) -> np.ndarray:
+def smooth_path(path: np.ndarray, samples: int = 512, strength: float = 1.8) -> np.ndarray:
     if len(path) < 4:
         return path
     pts = path.astype(np.float32)
@@ -270,22 +271,45 @@ def smooth_path(path: np.ndarray, samples: int = 160) -> np.ndarray:
     pts = pts[np.r_[True, np.diff(dist) > 0.2]]
     if len(pts) < 4:
         return pts
+    length = float(dist[-1])
+    n_out = int(np.clip(length * 1.2, 16, samples))
+    centered = pts - pts.mean(axis=0)
+    if len(pts) >= 8:
+        _, _, vh = np.linalg.svd(centered, full_matrices=False)
+        straight_tol = min(4.0, max(1.25, 0.006 * length))
+        if np.percentile(np.abs(centered @ vh[1]), 85) <= straight_tol:
+            return np.linspace(pts[0], pts[-1], n_out).astype(np.float32)
     try:
-        tck, _ = splprep([pts[:, 0], pts[:, 1]], s=max(1.0, len(pts) * 0.08), k=min(3, len(pts) - 1))
-        out = np.stack(splev(np.linspace(0, 1, min(samples, max(12, len(pts) * 2))), tck), axis=1).astype(np.float32)
+        tck, _ = splprep([pts[:, 0], pts[:, 1]], s=max(4.0, len(pts) * strength), k=min(3, len(pts) - 1))
+        out = np.stack(splev(np.linspace(0, 1, n_out), tck), axis=1).astype(np.float32)
         out[0], out[-1] = pts[0], pts[-1]
         return out
     except Exception:
         return pts
 
 
+def stroke_width(mask: np.ndarray, path: np.ndarray, fallback: int) -> int:
+    """Estimate the actual stroke width of a mask using area / centerline-length.
+
+    Returns the real width so join/smooth do not inflate the source thickness.
+    `fallback` is only used when the path is too short to estimate from.
+    """
+    if len(path) < 2:
+        return max(1, int(fallback))
+    length = float(np.sum(np.sqrt(np.sum(np.diff(path, axis=0) ** 2, axis=1))))
+    if length < 1.0:
+        return max(1, int(fallback))
+    width = int(round(float(mask.sum()) / length))
+    return max(1, width)
+
+
 def draw_path(shape: tuple[int, int], path: np.ndarray, thickness: int) -> np.ndarray:
     out = np.zeros(shape, dtype=np.uint8)
     if len(path) == 1:
-        cv2.circle(out, tuple(np.round(path[0, ::-1]).astype(np.int32)), max(1, thickness // 2), 1, -1)
+        cv2.circle(out, tuple(np.round(path[0, ::-1]).astype(np.int32)), max(1, thickness // 2), 255, -1, cv2.LINE_AA)
     elif len(path) > 1:
-        cv2.polylines(out, [np.round(path[:, ::-1]).astype(np.int32).reshape(-1, 1, 2)], False, 1, max(1, int(thickness)), cv2.LINE_AA)
-    return out > 0
+        cv2.polylines(out, [np.round(path[:, ::-1]).astype(np.int32).reshape(-1, 1, 2)], False, 255, max(1, int(thickness)), cv2.LINE_AA)
+    return out > 32
 
 
 def components(mask: np.ndarray, min_area: int) -> list[np.ndarray]:
@@ -317,11 +341,19 @@ def bridge_components(mask: np.ndarray) -> np.ndarray:
 
 
 def cleaned_mask(mask: np.ndarray, thickness: int, min_area: int, connect: bool = True) -> np.ndarray:
+    """Re-render a mask via skeleton path + estimated local width.
+
+    Width is derived from the source mask itself (area / centerline length),
+    so join/smooth never inflate beyond the natural stroke. The `thickness`
+    argument is only used as a fallback when the path is too short to measure.
+    """
     work = remove_small_objects(mask.astype(bool), min_size=max(1, min_area))
     work = bridge_components(work) if connect else work
     out = np.zeros(mask.shape, dtype=bool)
     for comp in components(work, min_area):
-        out |= draw_path(mask.shape, smooth_path(dominant_path(comp)), thickness)
+        path = smooth_path(dominant_path(comp))
+        width = stroke_width(comp, path, thickness)
+        out |= draw_path(mask.shape, path, width)
     return out if out.any() else work
 
 
@@ -486,7 +518,7 @@ class ManualIDEditor:
                  f"| overlaps={int(self.overlap.sum())} | selected={sorted(self.state['selected'])} "
                  f"| brush_diam={self.state['brush'] * 2 + 1}")
         self.ax.set_title(title + (" | unsaved" if self.state["dirty"] else ""))
-        help_line = "1 select | 2 cut | 3 erase | 4 paint\nctrl-click multi-select | l lock | j join\nwheel brush | ctrl+wheel zoom | shift/alt+wheel pan"
+        help_line = "1 select | 2 cut | 3 erase | 4 paint\nctrl-click multi-select | l lock | j join | q smooth\nwheel brush | ctrl+wheel zoom | shift/alt+wheel pan"
         self.info.set_text((self.stats_text(self.active() or self.state["hover"]) + "\n" + help_line).strip())
         self.fig.canvas.draw_idle()
 
@@ -585,6 +617,31 @@ class ManualIDEditor:
         self.sync()
         self.log("join", selected, keep, abs(len(merged) - before_px), f"merged_area={len(merged)}")
         self.state["dirty"] = True
+
+    def smooth_selected(self) -> None:
+        selected = sorted(self.selected_existing())
+        if not selected:
+            return
+        self.push_undo()
+        changed = 0
+        for cid in selected:
+            before = set(self.members[cid])
+            smoothed = flat_set(cleaned_mask(mask_from(before, self.lbl.shape), self.args.thickness, self.args.min_area, False))
+            if not smoothed:
+                continue
+            changed += len(before ^ smoothed)
+            self.members[cid] = smoothed
+            if not self.state["protect"]:
+                for other in list(self.members):
+                    if other != cid:
+                        self.members[other].difference_update(smoothed)
+        if changed:
+            self.sync()
+            self.state["selected"] = {cid for cid in selected if self.members.get(cid)}
+            self.log("smooth", selected, selected[0] if len(selected) == 1 else None, changed)
+            self.state["dirty"] = True
+        else:
+            self.undo.pop()
 
     def finish_erase_history(self, before: dict[int, set[int]] | None) -> None:
         if before is None:
@@ -713,7 +770,7 @@ class ManualIDEditor:
 
     def on_key(self, event) -> None:
         key = str(event.key).lower() if event.key else ""
-        if key in {"1", "q"}:
+        if key == "1":
             self.state["mode"] = "select"
         elif key in {"2", "x"}:
             self.state["mode"] = "cut"
@@ -723,6 +780,8 @@ class ManualIDEditor:
             self.state["mode"] = "paint"
         elif key == "j":
             self.join_selected()
+        elif key == "q":
+            self.smooth_selected()
         elif key == "n":
             self.step_id(+1)
         elif key == "p":

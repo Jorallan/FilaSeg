@@ -46,9 +46,26 @@ _REF_UM_PER_PX     = 1.66 / 1536            # SEM08 reference; do not change
 _USE_SCALING       = True                    # master on/off switch
 DEFAULT_UM_PER_PX  = _REF_UM_PER_PX          # change per dataset, or pass --um-per-px
 
-# ── Reconnect ─────────────────────────────────────────────────────────────
+# ── Stringart (stage 1) ───────────────────────────────────────────────────
+# Tile-grid voting: process the image at multiple tile-grid origins and keep
+# pixels that appear in >= TILE_GRID_VOTE_MIN of them. Mitigates tile-boundary
+# sensitivity. Default 4-grid majority voting (~4× stringart cost but cleaner).
+# Pass a JSON string at CLI to override, e.g. "[[0,0]]" for single-grid.
+DEFAULT_TILE_GRID_OFFSETS  = "[[0,0],[64,0],[0,64],[64,64]]"
+DEFAULT_TILE_GRID_VOTE_MIN = 2
+
+# ── Reconnect (stage 3) ───────────────────────────────────────────────────
 # "straight" = standard evaluator  |  "curvy" = arc-aware (recommended for CNT)
-DEFAULT_RECONNECT_VERSION = "straight"
+DEFAULT_RECONNECT_VERSION   = "straight"
+# Overlap handling (modifies thresholds in the generated YAML):
+#   overlap_mode = "trim"  → keep all viable sub-components after removing overlap.
+#                  "kill"  → drop the entire smaller component (legacy).
+#   overlap_kill_thr        triggers above-threshold overlap action (0.3-0.7).
+#   trim_dilate_px         halo: temporarily dilate the larger component during
+#                          the trim test/subtraction. Not persisted to its mask.
+DEFAULT_RECO_OVERLAP_MODE     = "trim"
+DEFAULT_RECO_OVERLAP_KILL_THR = 0.3
+DEFAULT_RECO_TRIM_DILATE_PX   = 2
 
 # ── Preprocess (stage 2) ──────────────────────────────────────────────────
 DEFAULT_PRE_BIN_THRESHOLD    = 127  # grayscale threshold for binarising branch masks
@@ -57,6 +74,9 @@ DEFAULT_PRE_LINE_CLOSE_ITERS = 2    # closing iterations
 DEFAULT_PRE_MIN_COMPONENT    = 10    # drop connected components smaller than this (px)
 DEFAULT_PRE_CLEAN_TO_PATH    = True # reduce multi-tip components to dominant 2-tip path
 DEFAULT_PRE_CLEAN_SMOOTH_WIN = 4    # smoothing window for the dominant path
+DEFAULT_PRE_TARGET_WIDTH_PX  = 0    # 0 = use per-branch median width; >0 = uniform width across all components
+DEFAULT_PRE_FIT_DEGREE       = 2    # 0=skip spline fit; 1/2/3=parametric B-spline degree (forces physically meaningful curve)
+DEFAULT_PRE_FIT_SMOOTHING    = 1.5  # spline smoothing factor multiplier (higher = stiffer fit)
 
 # ── Postprocess (stage 4) ─────────────────────────────────────────────────
 DEFAULT_THICKEN_PX         = 8    # px to thicken each final bundle centerline
@@ -66,6 +86,8 @@ DEFAULT_ABSORB_LEN         = 30   # absorb bundles shorter than this into a long
 DEFAULT_ABSORB_RADIUS      = 6    # halo radius (px) for neighbour detection during absorb
 DEFAULT_BRIDGE_RADIUS      = 12   # re-join same-source split pieces within this radius
 DEFAULT_OVERLAY_ALPHA      = 0.72 # overlay blend (0 = background only, 1 = labels only)
+DEFAULT_OVERLAP_ABSORB_THR = 0.6  # 0=disabled. 0.6-0.7 absorbs near-duplicate IDs into the larger
+DEFAULT_TIP_TRIM_FRAC      = 0.15  # 0=disabled. ~0.15 trims overlap pixels near an ID's skeleton tip
 
 # ── DEM JSON ──────────────────────────────────────────────────────────────
 DEFAULT_POLYLINE_STEP = 1   # keep every Nth centerline point in DEM JSON (1 = all)
@@ -87,6 +109,14 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--python", default=sys.executable)
     # reconnect
     ap.add_argument("--reconnect-version", default=DEFAULT_RECONNECT_VERSION, choices=["straight", "curvy"])
+    ap.add_argument("--reco-overlap-mode", type=str, default=DEFAULT_RECO_OVERLAP_MODE,
+                    choices=["kill", "trim"],
+                    help='Reconnect overlap-handling mode. "trim" keeps viable sub-components of '
+                         'the smaller after removing overlap; "kill" drops the smaller entirely.')
+    ap.add_argument("--reco-overlap-kill-thr", type=float, default=DEFAULT_RECO_OVERLAP_KILL_THR,
+                    help="Fraction-of-overlap above which the small component is killed/trimmed.")
+    ap.add_argument("--reco-trim-dilate-px", type=int, default=DEFAULT_RECO_TRIM_DILATE_PX,
+                    help="Temporary dilation (px) of the larger component during the trim test; not persisted.")
     # preprocess
     ap.add_argument("--pre-bin-threshold",    type=int,   default=DEFAULT_PRE_BIN_THRESHOLD)
     ap.add_argument("--pre-line-close-len",   type=int,   default=DEFAULT_PRE_LINE_CLOSE_LEN)
@@ -94,6 +124,12 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--pre-min-component",    type=int,   default=DEFAULT_PRE_MIN_COMPONENT)
     ap.add_argument("--pre-clean-to-path",   action=argparse.BooleanOptionalAction, default=DEFAULT_PRE_CLEAN_TO_PATH)
     ap.add_argument("--pre-clean-smooth-win",type=int,   default=DEFAULT_PRE_CLEAN_SMOOTH_WIN)
+    ap.add_argument("--pre-target-width-px", type=int,   default=DEFAULT_PRE_TARGET_WIDTH_PX,
+                    help="Width to re-render every preprocess component at. 0=per-branch median.")
+    ap.add_argument("--pre-fit-degree", type=int, default=DEFAULT_PRE_FIT_DEGREE,
+                    help="Polynomial/B-spline degree for skeleton smoothing in preprocess (0=skip).")
+    ap.add_argument("--pre-fit-smoothing", type=float, default=DEFAULT_PRE_FIT_SMOOTHING,
+                    help="Spline smoothing factor multiplier in preprocess.")
     # postprocess
     ap.add_argument("--thicken-px",      type=int,   default=DEFAULT_THICKEN_PX)
     ap.add_argument("--smooth-window",   type=int,   default=DEFAULT_SMOOTH_WINDOW)
@@ -102,6 +138,12 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--absorb-radius",   type=int,   default=DEFAULT_ABSORB_RADIUS)
     ap.add_argument("--bridge-radius",   type=int,   default=DEFAULT_BRIDGE_RADIUS)
     ap.add_argument("--overlay-alpha",   type=float, default=DEFAULT_OVERLAY_ALPHA)
+    ap.add_argument("--overlap-absorb-thr", type=float, default=DEFAULT_OVERLAP_ABSORB_THR,
+                    help="Postprocess: absorb near-duplicate IDs whose intersection covers >= this "
+                         "fraction of the smaller. 0 disables. Try 0.6-0.7.")
+    ap.add_argument("--tip-trim-frac", type=float, default=DEFAULT_TIP_TRIM_FRAC,
+                    help="Postprocess: erase overlap pixels at an ID's skeleton tip when overlap is "
+                         "tip-dominant. 0 disables. Try 0.15.")
     # DEM JSON
     ap.add_argument("--polyline-step",   type=int,   default=DEFAULT_POLYLINE_STEP)
     # physical-scale auto-scaling
@@ -111,10 +153,10 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--no-scale", action="store_true",
                     help="Disable pixel-parameter scaling; use raw defaults regardless of µm/px.")
     # stringart multi-grid voting (passed through to stage 1)
-    ap.add_argument("--tile-grid-offsets", type=str, default=None,
+    ap.add_argument("--tile-grid-offsets", type=str, default=DEFAULT_TILE_GRID_OFFSETS,
                     help='JSON list of [oy,ox] tile-grid origins for stringart multi-grid voting, '
                          'e.g. "[[0,0],[64,64]]". Mitigates tile-boundary sensitivity. ~Nx cost.')
-    ap.add_argument("--tile-grid-vote-min", type=int, default=None,
+    ap.add_argument("--tile-grid-vote-min", type=int, default=DEFAULT_TILE_GRID_VOTE_MIN,
                     help="Min grids a pixel must appear in to be kept (1=OR, 2+=majority).")
     return ap.parse_args()
 
@@ -296,13 +338,29 @@ def main() -> None:
         print(f"[scale] no scaling applied  (source={scale_source}, um_per_px={um_per_px:.6f})")
         reconnect_cfg = ROOT / "3.reconnect" / "reconnect_config.yaml"
 
+    # Apply CLI overrides to the reconnect YAML (overlap_mode, overlap_kill_thr,
+    # trim_dilate_px). If we hadn't already produced a scaled copy, copy the
+    # original into the run dir first so we never mutate the source YAML.
+    import yaml as _yaml
+    if reconnect_cfg == ROOT / "3.reconnect" / "reconnect_config.yaml":
+        reconnect_cfg = run_dir / "reconnect_config_active.yaml"
+        reconnect_cfg.write_text(
+            (ROOT / "3.reconnect" / "reconnect_config.yaml").read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
+    _cfg = _yaml.safe_load(reconnect_cfg.read_text(encoding="utf-8"))
+    _cfg.setdefault("thresholds", {})["overlap_mode"]      = args.reco_overlap_mode
+    _cfg["thresholds"]["overlap_kill_thr"]                  = float(args.reco_overlap_kill_thr)
+    _cfg.setdefault("morphology", {})["trim_dilate_px"]    = int(args.reco_trim_dilate_px)
+    reconnect_cfg.write_text(_yaml.dump(_cfg, default_flow_style=False, sort_keys=False), encoding="utf-8")
+
     run([
         args.python, ROOT / "1.stringart" / "stringart_tiles.py",
         "--input", args.mask,
         "--output-root", run_dir,
         "--output-folder-name", STAGE_STRINGART,
-        *(["--tile-grid-offsets", args.tile_grid_offsets] if args.tile_grid_offsets else []),
-        *(["--tile-grid-vote-min", str(args.tile_grid_vote_min)] if args.tile_grid_vote_min is not None else []),
+        "--tile-grid-offsets", args.tile_grid_offsets,
+        "--tile-grid-vote-min", str(args.tile_grid_vote_min),
     ])
     run([
         args.python, ROOT / "2.preprocess" / "preprocess_stringart_branches.py",
@@ -316,6 +374,9 @@ def main() -> None:
         "--min-component-area", str(args.pre_min_component),
         *(["--clean-to-path"] if args.pre_clean_to_path else ["--no-clean-to-path"]),
         "--clean-smooth-win", str(args.pre_clean_smooth_win),
+        "--target-width-px", str(args.pre_target_width_px),
+        "--fit-degree", str(args.pre_fit_degree),
+        "--fit-smoothing", str(args.pre_fit_smoothing),
     ])
     run([
         args.python, "reconnect_run.py",
@@ -338,6 +399,8 @@ def main() -> None:
         "--absorb-radius",              str(args.absorb_radius),
         "--same-source-bridge-radius",  str(args.bridge_radius),
         "--overlay-alpha",              str(args.overlay_alpha),
+        "--overlap-absorb-thr",         str(args.overlap_absorb_thr),
+        "--tip-trim-frac",              str(args.tip_trim_frac),
     ])
 
     post_labels = find_one(post_out, "*_post_labels.tif")

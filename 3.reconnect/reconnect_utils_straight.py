@@ -914,8 +914,22 @@ def _reconnect_components_inner(components: List[Component], cfg: Dict) -> List[
     search_size        = int(thr.get("search_size_px", 25))
     candidate_layers   = str(thr.get("candidate_layers", "all")).lower().strip()
     overlap_kill_thr   = float(thr.get("overlap_kill_thr", 0.70))
+    overlap_min_keep_area = int(thr.get("min_component_area", 15))
+    # "kill" (default): drop the entire smaller component (legacy behavior).
+    # "trim"          : erase pixels overlapping the larger, then re-CC the
+    #                   remainder and keep EVERY sub-component whose area
+    #                   >= min_component_area. Drop sub-components below it.
+    #                   Each kept fragment becomes its own Component with a
+    #                   fresh ID, allowing it to participate in tip-bridging
+    #                   independently. This preserves "tail" pixels that sit
+    #                   outside the bigger bundle.
+    overlap_mode = str(thr.get("overlap_mode", "kill")).lower().strip()
+    # Back-compat alias from earlier experiment naming.
+    if overlap_mode == "trim_largest":
+        overlap_mode = "trim"
     max_component_tips = int(adv.get("max_component_tips", 8))
     min_tip_trace_len  = float(adv.get("min_tip_trace_len_px", 3.0))
+    trim_dilate_px     = int(morph.get("trim_dilate_px", 0))
 
     for c in components:
         c.refresh_geom(trace_steps, fit_points, max_tips=max_component_tips, min_tip_trace_len=min_tip_trace_len)
@@ -959,8 +973,28 @@ def _reconnect_components_inner(components: List[Component], cfg: Dict) -> List[
         return sorted(cands)
 
     def _suppress_large_overlaps() -> int:
+        """Resolve heavy component overlaps.
+
+        Two strategies, selected by `thresholds.overlap_mode`:
+
+        - "kill" (default): drop the entire smaller component. Stable, legacy.
+        - "trim": erase the smaller's pixels that overlap the larger, then re-CC
+          the remainder and keep ALL sub-components with area >= min_component_area.
+          The first kept fragment reuses the original component's ID; any further
+          fragments are spawned as fresh Components appended to the list, with
+          fresh IDs and their own refreshed geometry. Sub-components below the
+          threshold are dropped.
+
+        If `morphology.trim_dilate_px > 0`, the LARGER component is temporarily
+        dilated by that many px for the overlap test and the pixel-subtraction
+        step. The dilation is NOT persisted to the larger component's actual
+        mask — it's purely a halo used to catch adjacent-but-not-yet-overlapping
+        small pieces. This lets us absorb thin slivers that sit just next to a
+        bigger bundle but technically don't share pixels yet.
+        """
+        from scipy.ndimage import binary_dilation as _bdil
         alive = sorted(_alive(), key=lambda z: (-int(z.mask.sum()), z.id))
-        kills = 0
+        events = 0
         for i in range(len(alive)):
             a = alive[i]
             if not a.exist:
@@ -969,25 +1003,71 @@ def _reconnect_components_inner(components: List[Component], cfg: Dict) -> List[
                 b = alive[j]
                 if not b.exist or not _bbox_intersects(a.bbox, b.bbox):
                     continue
-                overlap = np.logical_and(a.mask, b.mask)
-                if not overlap.any():
-                    continue
-                oa = float(np.count_nonzero(overlap)) / max(1.0, float(np.count_nonzero(a.mask)))
-                ob = float(np.count_nonzero(overlap)) / max(1.0, float(np.count_nonzero(b.mask)))
-                if max(oa, ob) <= overlap_kill_thr:
-                    continue
+                # Determine small/big first; the halo only expands the big.
                 key_a = (a.skel_len, float(np.count_nonzero(a.mask)), -a.id)
                 key_b = (b.skel_len, float(np.count_nonzero(b.mask)), -b.id)
-                dead = b if key_a >= key_b else a
-                dead.exist = False
-                kills += 1
-                if verbose and kills % print_every_merge == 0:
-                    keep = a if dead is b else b
-                    print(f"  [kill-overlap] keep(id={keep.id},layer={keep.layer}) "
-                          f"kill(id={dead.id},layer={dead.layer}) oa={oa:.3f} ob={ob:.3f}")
-                if dead is a:
+                small, big = (b, a) if key_a >= key_b else (a, b)
+                big_eff = (_bdil(big.mask, iterations=trim_dilate_px)
+                           if trim_dilate_px > 0 else big.mask)
+                overlap = np.logical_and(small.mask, big_eff)
+                if not overlap.any():
+                    continue
+                overlap_count = float(np.count_nonzero(overlap))
+                big_count   = max(1.0, float(np.count_nonzero(big.mask)))
+                small_count = max(1.0, float(np.count_nonzero(small.mask)))
+                oa = overlap_count / big_count       # vs big's original area
+                ob = overlap_count / small_count
+                if max(oa, ob) <= overlap_kill_thr:
+                    continue
+
+                if overlap_mode == "trim":
+                    # Subtract the dilated big from small (so a sliver right
+                    # next to big also gets carved away).
+                    trimmed = small.mask & ~big_eff
+                    kept_masks: List[np.ndarray] = []
+                    if trimmed.any():
+                        cc = cc_label(trimmed, connectivity=2)
+                        ncc = int(cc.max())
+                        if ncc > 0:
+                            sizes = np.bincount(cc.ravel())
+                            sizes[0] = 0
+                            for k in range(1, ncc + 1):
+                                if int(sizes[k]) >= overlap_min_keep_area:
+                                    kept_masks.append(cc == k)
+                            # Sort largest-first so the original `small` keeps the
+                            # biggest piece for stability.
+                            kept_masks.sort(key=lambda m: -int(m.sum()))
+                    if not kept_masks:
+                        small.exist = False
+                        new_n = 0
+                    else:
+                        small.mask = kept_masks[0]
+                        small.refresh_geom(trace_steps, fit_points,
+                                           max_tips=max_component_tips,
+                                           min_tip_trace_len=min_tip_trace_len)
+                        # Spawn fresh Components for the remaining viable fragments.
+                        for extra in kept_masks[1:]:
+                            new_id = max((c.id for c in components), default=0) + 1
+                            new_comp = Component(id=new_id, layer=small.layer,
+                                                 mask=extra, exist=True)
+                            new_comp.refresh_geom(trace_steps, fit_points,
+                                                  max_tips=max_component_tips,
+                                                  min_tip_trace_len=min_tip_trace_len)
+                            components.append(new_comp)
+                        new_n = len(kept_masks) - 1
+                else:   # legacy kill behavior
+                    small.exist = False
+                    new_n = 0
+
+                events += 1
+                if verbose and events % print_every_merge == 0:
+                    tag = "trim" if overlap_mode == "trim" else "kill"
+                    print(f"  [{tag}-overlap] src(id={small.id},layer={small.layer}) -> "
+                          f"big(id={big.id},layer={big.layer}) oa={oa:.3f} ob={ob:.3f} "
+                          f"alive={small.exist} spawned={new_n}")
+                if small is a and not a.exist:
                     break
-        return kills
+        return events
 
     pass_idx = total_merges = total_kills = 0
     refresh_kwargs = dict(max_tips=max_component_tips, min_tip_trace_len=min_tip_trace_len)
