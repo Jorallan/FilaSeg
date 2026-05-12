@@ -801,7 +801,7 @@ def _evaluate_tip_pair(
     dist = float(np.linalg.norm(dvec))
     rec["dist"] = dist
     max_tip_dist = float(thr.get("max_tip_distance_px", 40))
-    if dist <= 1e-6 or dist > max_tip_dist:
+    if dist <= 1e-6:
         return reject("distance")
     u = dvec / dist
 
@@ -838,6 +838,7 @@ def _evaluate_tip_pair(
     _cm_min_opp   = float(thr.get("clear_merge_min_opposition", -1.0))
     _cm_multitip_min_fwd = float(thr.get("clear_merge_multitip_min_forward_cos", 0.0))
     _cm_backward_max_layer_gap = int(thr.get("clear_merge_backward_max_layer_gap", 4))
+    _cm_overrun_max_dist = float(thr.get("clear_merge_overrun_max_dist_px", 0.0))
     _tip_count = max(len(base.tips or {}), len(tar.tips or {}))
     _is_clear = (
         _cm_max_dist > 0.0
@@ -845,6 +846,25 @@ def _evaluate_tip_pair(
         and line_resid <= _cm_max_resid
         and (-inward_opposition) >= _cm_min_opp
     )
+    # Sometimes overlap cleanup leaves one endpoint slightly past the physical
+    # join, so both local tangents appear backward even though the two long
+    # two-tip paths are collinear. Accept only this very tight overrun case.
+    _is_overrun_clear = (
+        merge_mode in {"clear", "clear_merge"}
+        and _cm_overrun_max_dist > 0.0
+        and max_tip_dist < dist <= _cm_overrun_max_dist
+        and _tip_count <= 2
+        and min(float(base.skel_len), float(tar.skel_len)) >= 5.0 * dist
+        and forward_base <= -0.85
+        and forward_tar <= -0.85
+        and line_resid <= min(3.0, _cm_max_resid)
+        and (-inward_opposition) >= max(0.95, _cm_min_opp)
+        and layer_gap <= 1
+    )
+    if dist > max_tip_dist and not _is_overrun_clear:
+        return reject("distance")
+    if _is_overrun_clear:
+        _is_clear = True
     if merge_mode in {"clear", "clear_merge"} and not _is_clear:
         return reject("not_clear_merge")
     if merge_mode not in {"clear", "clear_merge"}:
@@ -941,7 +961,8 @@ def _evaluate_tip_pair(
     if _is_clear:
         # Priority score: always beats normal merges; distance still differentiates
         # within the clear-merge tier.
-        score_scalar = -10.0 + float(wgt.get("distance", 1.0)) * (dist / max(1.0, _cm_max_dist))
+        score_dist = max(_cm_max_dist, _cm_overrun_max_dist if _is_overrun_clear else _cm_max_dist)
+        score_scalar = -10.0 + float(wgt.get("distance", 1.0)) * (dist / max(1.0, score_dist))
     else:
         score_scalar = (
             float(wgt.get("distance",          1.0)) * (dist / max(1.0, max_tip_dist))
@@ -1000,6 +1021,7 @@ def _reconnect_components_inner(components: List[Component], cfg: Dict) -> List[
     runtime = cfg.get("runtime", {})
     geom    = cfg.get("geometry", {})
     morph   = cfg.get("morphology", {})
+    overlap_cfg = cfg.get("overlap", {})
 
     verbose              = bool(runtime.get("verbose", True))
     max_passes           = int(runtime.get("max_passes", 200))
@@ -1011,8 +1033,8 @@ def _reconnect_components_inner(components: List[Component], cfg: Dict) -> List[
     fit_points         = int(max(4, geom.get("fit_points", 12)))
     search_size        = int(thr.get("search_size_px", 25))
     candidate_layers   = str(thr.get("candidate_layers", "all")).lower().strip()
-    overlap_kill_thr   = float(thr.get("overlap_kill_thr", 0.70))
-    overlap_min_keep_area = int(thr.get("min_component_area", 15))
+    overlap_kill_thr = float(overlap_cfg.get("kill_thr", thr.get("overlap_kill_thr", 0.70)))
+    overlap_min_keep_area = int(overlap_cfg.get("min_keep_area", thr.get("min_component_area", 15)))
     # "kill" (default): drop the entire smaller component (legacy behavior).
     # "trim"          : erase pixels overlapping the larger, then re-CC the
     #                   remainder and keep EVERY sub-component whose area
@@ -1021,7 +1043,7 @@ def _reconnect_components_inner(components: List[Component], cfg: Dict) -> List[
     #                   fresh ID, allowing it to participate in tip-bridging
     #                   independently. This preserves "tail" pixels that sit
     #                   outside the bigger bundle.
-    overlap_mode = str(thr.get("overlap_mode", "kill")).lower().strip()
+    overlap_mode = str(overlap_cfg.get("mode", thr.get("overlap_mode", "kill"))).lower().strip()
     # Back-compat alias from earlier experiment naming.
     if overlap_mode == "trim_largest":
         overlap_mode = "trim"
@@ -1033,7 +1055,7 @@ def _reconnect_components_inner(components: List[Component], cfg: Dict) -> List[
         prune_spur_px=int(geom.get("tip_prune_spur_px", 0)),
         dedupe_sep_px=float(geom.get("tip_dedupe_sep_px", 2.0)),
     )
-    trim_dilate_px     = int(morph.get("trim_dilate_px", 0))
+    trim_dilate_px = int(overlap_cfg.get("trim_dilate_px", morph.get("trim_dilate_px", 0)))
 
     for c in components:
         c.refresh_geom(trace_steps, fit_points, **refresh_kwargs)
@@ -1079,17 +1101,17 @@ def _reconnect_components_inner(components: List[Component], cfg: Dict) -> List[
     def _suppress_large_overlaps() -> int:
         """Resolve heavy component overlaps.
 
-        Two strategies, selected by `thresholds.overlap_mode`:
+        Two strategies, selected by `overlap.mode`:
 
         - "kill" (default): drop the entire smaller component. Stable, legacy.
         - "trim": erase the smaller's pixels that overlap the larger, then re-CC
-          the remainder and keep ALL sub-components with area >= min_component_area.
+          the remainder and keep ALL sub-components with area >= overlap.min_keep_area.
           The first kept fragment reuses the original component's ID; any further
           fragments are spawned as fresh Components appended to the list, with
           fresh IDs and their own refreshed geometry. Sub-components below the
           threshold are dropped.
 
-        If `morphology.trim_dilate_px > 0`, the LARGER component is temporarily
+        If `overlap.trim_dilate_px > 0`, the LARGER component is temporarily
         dilated by that many px for the overlap test only. The dilation is NOT
         persisted to the larger component's actual mask and is not subtracted
         from the smaller mask, which avoids cutting real adjacent filament

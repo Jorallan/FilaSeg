@@ -56,12 +56,12 @@ DEFAULT_TILE_GRID_VOTE_MIN = 2
 
 # ── Reconnect (stage 3) ───────────────────────────────────────────────────
 DEFAULT_RECONNECT_VERSION   = "straight"
-# Overlap handling (modifies thresholds in the generated YAML):
-#   overlap_mode = "trim"  → keep all viable sub-components after removing overlap.
-#                  "kill"  → drop the entire smaller component (legacy).
-#   overlap_kill_thr        triggers above-threshold overlap action (0.3-0.7).
-#   trim_dilate_px         optional halo: temporarily dilate the larger component
-#                          during the overlap test. 0 disables it.
+# Reconnect overlap handling (modifies the generated YAML `overlap` block):
+#   mode = "trim"  → keep all viable sub-components after removing overlap.
+#          "kill"  → drop the entire smaller component (legacy).
+#   kill_thr        triggers above-threshold overlap action (0.3-0.7).
+#   trim_dilate_px  optional halo: temporarily dilate the larger component
+#                   during the overlap test. 0 disables it.
 DEFAULT_RECO_OVERLAP_MODE     = "trim"
 DEFAULT_RECO_OVERLAP_KILL_THR = 0.3
 DEFAULT_RECO_TRIM_DILATE_PX   = 0
@@ -85,10 +85,10 @@ DEFAULT_ABSORB_LEN         = 30   # absorb bundles shorter than this into a long
 DEFAULT_ABSORB_RADIUS      = 6    # halo radius (px) for neighbour detection during absorb
 DEFAULT_BRIDGE_RADIUS      = 12   # re-join same-source split pieces within this radius
 DEFAULT_OVERLAY_ALPHA      = 0.72 # overlay blend (0 = background only, 1 = labels only)
-DEFAULT_OVERLAP_ABSORB_THR = 0.6  # 0=disabled. 0.6-0.7 absorbs near-duplicate IDs into the larger
-DEFAULT_OCCLUSION_TRIM_THR = 0.25 # trim lower-priority layers mostly hidden by earlier layers
+DEFAULT_OVERLAP_ABSORB_THR = 0.6  # postprocess overlap: absorb near-duplicate IDs into the larger
+DEFAULT_OCCLUSION_TRIM_THR = 0.25 # postprocess overlap: trim lower-priority layers hidden by earlier layers
 DEFAULT_OCCLUSION_TRIM_MIN_PX = 50 # hidden rendered pixels required before occlusion trim triggers
-DEFAULT_TIP_TRIM_FRAC      = 0.10  # 0=disabled. ~0.15 trims overlap pixels near an ID's skeleton tip
+DEFAULT_TIP_TRIM_FRAC      = 0.10  # postprocess overlap: trim pixels near an ID's skeleton tip
 
 # ── DEM JSON ──────────────────────────────────────────────────────────────
 DEFAULT_POLYLINE_STEP = 1   # keep every Nth centerline point in DEM JSON (1 = all)
@@ -349,9 +349,9 @@ def main() -> None:
         print(f"[scale] no scaling applied  (source={scale_source}, um_per_px={um_per_px:.6f})")
         reconnect_cfg = ROOT / "3.reconnect" / "reconnect_config.yaml"
 
-    # Apply CLI overrides to the reconnect YAML (overlap_mode, overlap_kill_thr,
-    # trim_dilate_px). If we hadn't already produced a scaled copy, copy the
-    # original into the run dir first so we never mutate the source YAML.
+    # Apply CLI overrides to the reconnect YAML overlap block. If we had not
+    # already produced a scaled copy, copy the original into the run dir first
+    # so we never mutate the source YAML.
     import yaml as _yaml
     if reconnect_cfg == ROOT / "3.reconnect" / "reconnect_config.yaml":
         reconnect_cfg = run_dir / "reconnect_config_active.yaml"
@@ -360,9 +360,10 @@ def main() -> None:
             encoding="utf-8",
         )
     _cfg = _yaml.safe_load(reconnect_cfg.read_text(encoding="utf-8"))
-    _cfg.setdefault("thresholds", {})["overlap_mode"]      = args.reco_overlap_mode
-    _cfg["thresholds"]["overlap_kill_thr"]                  = float(args.reco_overlap_kill_thr)
-    _cfg.setdefault("morphology", {})["trim_dilate_px"]    = int(args.reco_trim_dilate_px)
+    _overlap = _cfg.setdefault("overlap", {})
+    _overlap["mode"] = args.reco_overlap_mode
+    _overlap["kill_thr"] = float(args.reco_overlap_kill_thr)
+    _overlap["trim_dilate_px"] = int(args.reco_trim_dilate_px)
     reconnect_cfg.write_text(_yaml.dump(_cfg, default_flow_style=False, sort_keys=False), encoding="utf-8")
 
     run([

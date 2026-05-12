@@ -48,6 +48,7 @@ output/
 The reconnect stage uses the straight evaluator with a staged config. The important behavior is:
 
 - Clear short-gap merge handling for visually obvious reconnections.
+- A narrow clear-merge overrun allowance for long, collinear two-tip paths whose endpoints slightly overshot each other.
 - Strict then relaxed tip reconnect passes for progressively broader candidate gaps.
 - Same-layer residual relaxation for fragments in the same orientation bin.
 - Relabeling lets longer surviving trunks claim overlaps first.
@@ -68,12 +69,12 @@ Within `stage_strict` and `stage_relaxed`, a **same-layer relaxation** path appl
 
 ### Overlap Handling
 
-Reconnect resolves heavy component overlaps with two strategies controlled by `thresholds.overlap_mode`:
+Reconnect resolves heavy component overlaps with settings grouped under the `overlap` config block:
 
-- `kill` (legacy): drop the entire smaller component when overlap exceeds `overlap_kill_thr`.
-- `trim` (recommended): erase only the pixels that overlap the larger component, then re-CC the remainder. Every sub-component with area ≥ `min_component_area` survives as its own fresh Component and can participate in downstream tip-bridging. Sub-components below the threshold are dropped.
+- `mode: kill` (legacy): drop the entire smaller component when overlap exceeds `kill_thr`.
+- `mode: trim` (recommended): erase only the pixels that overlap the larger component, then re-CC the remainder. Every sub-component with area ≥ `min_keep_area` survives as its own fresh Component and can participate in downstream tip-bridging. Sub-components below the threshold are dropped.
 
-`morphology.trim_dilate_px > 0` adds a temporary halo to the larger component during the overlap test only. The halo is not persisted and is not subtracted from the smaller component, which avoids carving artificial gaps into adjacent filaments.
+`overlap.trim_dilate_px > 0` adds a temporary halo to the larger component during the overlap test only. The halo is not persisted and is not subtracted from the smaller component, which avoids carving artificial gaps into adjacent filaments.
 
 ### Layered Multi-Label Output
 
@@ -177,7 +178,7 @@ The intent is conservative cleanup: keep the stringart branch identities, remove
 - Smooths that centerline with `--smooth-window`.
 - Redraws it as a slightly thicker label using `--thicken-px`.
 - **Overlap absorb** (`--overlap-absorb-thr`, default 0.6): after thickening, pairs whose intersection covers ≥ this fraction of the smaller mask are merged into the larger. Catches near-duplicate bundles that survive reconnect.
-- **Occlusion trim** (`--occlusion-trim-thr`, `--occlusion-trim-min-px`): trims lower-priority rendered layers whose pixels are mostly already covered by earlier layers.
+- **Occlusion trim** (`--occlusion-trim-thr`, `--occlusion-trim-min-px`): trims lower-priority rendered layers whose pixels are mostly already covered by earlier layers, then keeps only substantial visible fragments from that trim so tiny shell debris is not promoted into final IDs.
 - **Tip trim** (`--tip-trim-frac`): erases overlap pixels near an ID's skeleton tip so it merges cleanly into the neighboring bundle without redundant coverage.
 - Writes post labels, color preview, overlay, and `post_process_summary.json`.
 

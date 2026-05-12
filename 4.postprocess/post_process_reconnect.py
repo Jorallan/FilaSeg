@@ -35,6 +35,8 @@ DEFAULT_OVERLAP_ABSORB_THR      = 0.0   # 0 = disabled. >=0.5 absorbs near-dupli
 DEFAULT_OCCLUSION_TRIM_THR      = 0.0   # 0 = disabled. Trim lower-priority layers mostly hidden by earlier ones.
 DEFAULT_OCCLUSION_TRIM_MIN_PX   = 500   # minimum hidden pixels before occlusion trim can trigger
 DEFAULT_TIP_TRIM_FRAC           = 0.0   # 0 = disabled. ~0.15 trims overlap pixels at an ID's skeleton tip.
+OCCLUSION_FRAGMENT_MIN_PX       = 16    # keep tiny occlusion fragments only when the whole ID is tiny
+OCCLUSION_FRAGMENT_MIN_FRAC     = 0.06  # visible fragments below this fraction of the original layer are debris
 # ─────────────────────────────────────────────────────────────────────────
 
 
@@ -411,13 +413,14 @@ def trim_occluded_layers(
     layers: list[tuple[int, np.ndarray]],
     thr: float,
     min_px: int,
-) -> tuple[list[tuple[int, np.ndarray]], list[tuple[int, int, float]]]:
+) -> tuple[list[tuple[int, np.ndarray]], list[tuple[int, int, float]], int]:
     """Trim lower-priority layer pixels already covered by earlier layers."""
     if thr <= 0 or len(layers) < 2:
-        return layers, []
+        return layers, [], 0
     out: list[tuple[int, np.ndarray]] = []
     covered = np.zeros(layers[0][1].shape, dtype=bool)
     log: list[tuple[int, int, float]] = []  # (id, hidden_px, hidden_ratio)
+    fragment_removed = 0
     for cid, mask in layers:
         area = int(mask.sum())
         if area <= 0:
@@ -430,10 +433,22 @@ def trim_occluded_layers(
             if not np.any(mask):
                 log.append((int(cid), hidden_px, hidden_ratio))
                 continue
+            cc = cc_label(mask, connectivity=2)
+            if int(cc.max()) > 1:
+                min_fragment_area = max(
+                    OCCLUSION_FRAGMENT_MIN_PX,
+                    int(round(area * OCCLUSION_FRAGMENT_MIN_FRAC)),
+                )
+                kept = [cc == idx for idx in range(1, int(cc.max()) + 1)
+                        if int(np.count_nonzero(cc == idx)) >= min_fragment_area]
+                if kept:
+                    clean_mask = np.logical_or.reduce(kept)
+                    fragment_removed += int(mask.sum()) - int(clean_mask.sum())
+                    mask = clean_mask
             log.append((int(cid), hidden_px, hidden_ratio))
         out.append((int(cid), mask))
         covered |= mask
-    return out, log
+    return out, log, fragment_removed
 
 
 def trim_endpoint_overlaps(
@@ -557,11 +572,13 @@ def main() -> None:
         layered_out, tip_trim_pixels = trim_endpoint_overlaps(layered_out, float(args.tip_trim_frac))
     occlusion_trim_log: list[tuple[int, int, float]] = []
     if args.occlusion_trim_thr > 0:
-        layered_out, occlusion_trim_log = trim_occluded_layers(
+        layered_out, occlusion_trim_log, occlusion_fragment_removed = trim_occluded_layers(
             layered_out,
             float(args.occlusion_trim_thr),
             int(args.occlusion_trim_min_px),
         )
+    else:
+        occlusion_fragment_removed = 0
 
     # Flatten layered_out into the final label image. Layers are already in
     # priority order (longest first); first-write-wins preserves "longer-bundle
@@ -605,6 +622,7 @@ def main() -> None:
         "tip_trim_pixels": int(tip_trim_pixels),
         "occlusion_trim_thr": float(args.occlusion_trim_thr),
         "occlusion_trim_min_px": int(args.occlusion_trim_min_px),
+        "occlusion_fragment_removed_pixels": int(occlusion_fragment_removed),
         "occlusion_trimmed_layers": [
             {"id": int(cid), "hidden_px": int(px), "hidden_ratio": round(float(r), 4)}
             for cid, px, r in occlusion_trim_log

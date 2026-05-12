@@ -6,20 +6,23 @@ shared:
   filament_width_px: null        # set by stringart when available
 
 thresholds:
-  # Shared extraction, candidate search, and overlap cleanup defaults.
+  # Shared extraction and candidate search defaults.
   # Reconnect geometry gates are stage-local below.
   branch_bin: 0.5                # binary mask threshold
-  min_component_area: 15         # smallest kept component or trimmed fragment
-  overlap_kill_thr: 0.3          # overlap fraction above which kill/trim action triggers
-  overlap_mode: trim             # kill = drop smaller overlap; trim = keep viable non-overlap fragments
+  min_component_area: 15         # smallest initial branch component
   search_size_px: 40             # local candidate search window
   candidate_layers: all          # branch layers to compare
   max_width_ratio: 2.75          # maximum width mismatch
 
+overlap:
+  mode: trim                     # kill = drop smaller overlap; trim = keep viable non-overlap fragments
+  kill_thr: 0.3                  # overlap fraction above which kill/trim action triggers
+  min_keep_area: 15              # smallest kept trimmed fragment
+  trim_dilate_px: 10              # 0 disables halo; >0 uses a temporary larger-component overlap-test halo
+
 morphology:
   dilate_px: 1                   # label dilation radius
   tip_dir_steps: 10              # pixels used for tip direction
-  trim_dilate_px: 0              # 0 disables halo; >0 uses a temporary larger-component overlap-test halo
 
 preprocess:
   clean_min_area: 5              # smallest pre-score component
@@ -84,6 +87,7 @@ stage_clear:
     clear_merge_max_dist_px: 16.0 # clear merge distance cap
     clear_merge_max_line_resid_px: 6.0 # clear merge residual cap
     clear_merge_min_opposition: 0.6 # clear merge opposition
+    clear_merge_overrun_max_dist_px: 24.0 # longer clear merge only for long collinear endpoints that overshot each other
     clear_merge_multitip_min_forward_cos: 0.0 # require non-backward clear merges into multi-tip components
     clear_merge_backward_max_layer_gap: 4 # block backward clear merges across distant circular orientation bins
 

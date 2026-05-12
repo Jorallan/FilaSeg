@@ -38,7 +38,7 @@ PX_LINEAR_KEYS = frozenset({
     "bridge_clearance_px",
 })
 # Pixel-area keys: scale by sf².
-PX_AREA_KEYS = frozenset({"clean_min_area", "min_component_area"})
+PX_AREA_KEYS = frozenset({"clean_min_area", "min_component_area", "min_keep_area"})
 # Curvature keys (1/radius_px): scale by 1/sf.
 PX_CURV_KEYS = frozenset({"max_curvature_delta"})
 
