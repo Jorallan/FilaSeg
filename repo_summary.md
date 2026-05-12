@@ -178,7 +178,7 @@ The intent is conservative cleanup: keep the stringart branch identities, remove
 - Smooths that centerline with `--smooth-window`.
 - Redraws it as a slightly thicker label using `--thicken-px`.
 - **Overlap absorb** (`--overlap-absorb-thr`, default 0.6): after thickening, pairs whose intersection covers ≥ this fraction of the smaller mask are merged into the larger. Catches near-duplicate bundles that survive reconnect.
-- **Occlusion trim** (`--occlusion-trim-thr`, `--occlusion-trim-min-px`): trims lower-priority rendered layers whose pixels are mostly already covered by earlier layers, then keeps only substantial visible fragments from that trim so tiny shell debris is not promoted into final IDs.
+- **Occlusion trim** (`--occlusion-trim-thr`, `--occlusion-trim-min-px`): trims lower-priority rendered layers whose pixels are mostly already covered by earlier layers, keeps only substantial visible fragments, and hands off detached fragments that already overlap another rendered layer.
 - **Tip trim** (`--tip-trim-frac`): erases overlap pixels near an ID's skeleton tip so it merges cleanly into the neighboring bundle without redundant coverage.
 - Writes post labels, color preview, overlay, and `post_process_summary.json`.
 

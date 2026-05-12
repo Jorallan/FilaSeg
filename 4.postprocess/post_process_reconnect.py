@@ -37,6 +37,8 @@ DEFAULT_OCCLUSION_TRIM_MIN_PX   = 500   # minimum hidden pixels before occlusion
 DEFAULT_TIP_TRIM_FRAC           = 0.0   # 0 = disabled. ~0.15 trims overlap pixels at an ID's skeleton tip.
 OCCLUSION_FRAGMENT_MIN_PX       = 16    # keep tiny occlusion fragments only when the whole ID is tiny
 OCCLUSION_FRAGMENT_MIN_FRAC     = 0.06  # visible fragments below this fraction of the original layer are debris
+OCCLUSION_FRAGMENT_ADOPT_MIN_HIDDEN_FRAC = 0.5 # only hand off fragments from mostly occluded layers
+OCCLUSION_FRAGMENT_ADOPT_OVERLAP_PX = 3 # hand off split fragments that already share pixels with another layer
 # ─────────────────────────────────────────────────────────────────────────
 
 
@@ -421,6 +423,7 @@ def trim_occluded_layers(
     covered = np.zeros(layers[0][1].shape, dtype=bool)
     log: list[tuple[int, int, float]] = []  # (id, hidden_px, hidden_ratio)
     fragment_removed = 0
+    split_trimmed_ids: set[int] = set()
     for cid, mask in layers:
         area = int(mask.sum())
         if area <= 0:
@@ -445,9 +448,38 @@ def trim_occluded_layers(
                     clean_mask = np.logical_or.reduce(kept)
                     fragment_removed += int(mask.sum()) - int(clean_mask.sum())
                     mask = clean_mask
+                    if len(kept) > 1 and hidden_ratio >= OCCLUSION_FRAGMENT_ADOPT_MIN_HIDDEN_FRAC:
+                        split_trimmed_ids.add(int(cid))
             log.append((int(cid), hidden_px, hidden_ratio))
         out.append((int(cid), mask))
         covered |= mask
+
+    if split_trimmed_ids and len(out) > 1:
+        work = [(cid, mask.copy()) for cid, mask in out]
+        for i, (cid, mask) in enumerate(work):
+            if cid not in split_trimmed_ids:
+                continue
+            cc = cc_label(mask, connectivity=2)
+            if int(cc.max()) < 2:
+                continue
+            keep_mask = np.zeros_like(mask, dtype=bool)
+            for idx in range(1, int(cc.max()) + 1):
+                frag = cc == idx
+                best_j = -1
+                best_overlap = 0
+                for j, (other_id, other_mask) in enumerate(work):
+                    if i == j or other_id == cid:
+                        continue
+                    overlap_px = int(np.count_nonzero(frag & other_mask))
+                    if overlap_px > best_overlap:
+                        best_overlap = overlap_px
+                        best_j = j
+                if best_j >= 0 and best_overlap >= OCCLUSION_FRAGMENT_ADOPT_OVERLAP_PX:
+                    work[best_j] = (work[best_j][0], np.logical_or(work[best_j][1], frag))
+                else:
+                    keep_mask |= frag
+            work[i] = (cid, keep_mask)
+        out = [(cid, mask) for cid, mask in work if np.any(mask)]
     return out, log, fragment_removed
 
 
