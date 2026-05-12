@@ -32,6 +32,8 @@ DEFAULT_SAME_SOURCE_BRIDGE_RADIUS = 12 # merge disconnected pieces sharing the s
 DEFAULT_OVERLAY_ALPHA           = 0.72 # blend weight for the coloured overlay (0 = background only, 1 = labels only)
 # ── Overlap absorb / endpoint trim (after thickening) ─────────────────────
 DEFAULT_OVERLAP_ABSORB_THR      = 0.0   # 0 = disabled. >=0.5 absorbs near-duplicate IDs into the larger.
+DEFAULT_OCCLUSION_TRIM_THR      = 0.0   # 0 = disabled. Trim lower-priority layers mostly hidden by earlier ones.
+DEFAULT_OCCLUSION_TRIM_MIN_PX   = 500   # minimum hidden pixels before occlusion trim can trigger
 DEFAULT_TIP_TRIM_FRAC           = 0.0   # 0 = disabled. ~0.15 trims overlap pixels at an ID's skeleton tip.
 # ─────────────────────────────────────────────────────────────────────────
 
@@ -63,6 +65,11 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--overlap-absorb-thr", type=float, default=DEFAULT_OVERLAP_ABSORB_THR,
                     help="Pairs whose intersection covers >= this fraction of the smaller mask are merged "
                          "into the larger. 0 disables. Try 0.6-0.7.")
+    ap.add_argument("--occlusion-trim-thr", type=float, default=DEFAULT_OCCLUSION_TRIM_THR,
+                    help="Trim lower-priority rendered layers when this fraction is already covered by "
+                         "earlier layers. 0 disables.")
+    ap.add_argument("--occlusion-trim-min-px", type=int, default=DEFAULT_OCCLUSION_TRIM_MIN_PX,
+                    help="Minimum covered pixels required before --occlusion-trim-thr can trigger.")
     ap.add_argument("--tip-trim-frac", type=float, default=DEFAULT_TIP_TRIM_FRAC,
                     help="If overlap pixels of A∩B sit within this fraction of A's skeleton-tip distance, "
                          "erase them from A so it 'merges into' B without redundant overlap. 0 disables. "
@@ -400,6 +407,35 @@ def absorb_overlapping_layers(
     return out, log
 
 
+def trim_occluded_layers(
+    layers: list[tuple[int, np.ndarray]],
+    thr: float,
+    min_px: int,
+) -> tuple[list[tuple[int, np.ndarray]], list[tuple[int, int, float]]]:
+    """Trim lower-priority layer pixels already covered by earlier layers."""
+    if thr <= 0 or len(layers) < 2:
+        return layers, []
+    out: list[tuple[int, np.ndarray]] = []
+    covered = np.zeros(layers[0][1].shape, dtype=bool)
+    log: list[tuple[int, int, float]] = []  # (id, hidden_px, hidden_ratio)
+    for cid, mask in layers:
+        area = int(mask.sum())
+        if area <= 0:
+            continue
+        hidden = np.logical_and(mask, covered)
+        hidden_px = int(hidden.sum())
+        hidden_ratio = hidden_px / max(1, area)
+        if hidden_px >= int(min_px) and hidden_ratio >= float(thr):
+            mask = np.logical_and(mask, ~covered)
+            if not np.any(mask):
+                log.append((int(cid), hidden_px, hidden_ratio))
+                continue
+            log.append((int(cid), hidden_px, hidden_ratio))
+        out.append((int(cid), mask))
+        covered |= mask
+    return out, log
+
+
 def trim_endpoint_overlaps(
     layers: list[tuple[int, np.ndarray]], tip_frac: float
 ) -> tuple[list[tuple[int, np.ndarray]], int]:
@@ -512,10 +548,20 @@ def main() -> None:
     # then endpoint trim (cleans residual tip overlaps where small ID merges into big).
     overlap_absorb_log: list[tuple[int, int, float]] = []
     if args.overlap_absorb_thr > 0:
-        layered_out, overlap_absorb_log = absorb_overlapping_layers(layered_out, float(args.overlap_absorb_thr))
+        layered_out, overlap_absorb_log = absorb_overlapping_layers(
+            layered_out,
+            float(args.overlap_absorb_thr),
+        )
     tip_trim_pixels = 0
     if args.tip_trim_frac > 0:
         layered_out, tip_trim_pixels = trim_endpoint_overlaps(layered_out, float(args.tip_trim_frac))
+    occlusion_trim_log: list[tuple[int, int, float]] = []
+    if args.occlusion_trim_thr > 0:
+        layered_out, occlusion_trim_log = trim_occluded_layers(
+            layered_out,
+            float(args.occlusion_trim_thr),
+            int(args.occlusion_trim_min_px),
+        )
 
     # Flatten layered_out into the final label image. Layers are already in
     # priority order (longest first); first-write-wins preserves "longer-bundle
@@ -557,6 +603,13 @@ def main() -> None:
         "overlap_absorbed_count": len(overlap_absorb_log),
         "tip_trim_frac": float(args.tip_trim_frac),
         "tip_trim_pixels": int(tip_trim_pixels),
+        "occlusion_trim_thr": float(args.occlusion_trim_thr),
+        "occlusion_trim_min_px": int(args.occlusion_trim_min_px),
+        "occlusion_trimmed_layers": [
+            {"id": int(cid), "hidden_px": int(px), "hidden_ratio": round(float(r), 4)}
+            for cid, px, r in occlusion_trim_log
+        ],
+        "occlusion_trimmed_count": len(occlusion_trim_log),
         **layered_summary,
     }
     (args.output / "post_process_summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")

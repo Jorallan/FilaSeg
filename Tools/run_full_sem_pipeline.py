@@ -55,17 +55,16 @@ DEFAULT_TILE_GRID_OFFSETS  = "[[0,0],[64,0],[0,64],[64,64]]"
 DEFAULT_TILE_GRID_VOTE_MIN = 2
 
 # ── Reconnect (stage 3) ───────────────────────────────────────────────────
-# "straight" = standard evaluator  |  "curvy" = arc-aware (recommended for CNT)
 DEFAULT_RECONNECT_VERSION   = "straight"
 # Overlap handling (modifies thresholds in the generated YAML):
 #   overlap_mode = "trim"  → keep all viable sub-components after removing overlap.
 #                  "kill"  → drop the entire smaller component (legacy).
 #   overlap_kill_thr        triggers above-threshold overlap action (0.3-0.7).
-#   trim_dilate_px         halo: temporarily dilate the larger component during
-#                          the trim test/subtraction. Not persisted to its mask.
+#   trim_dilate_px         optional halo: temporarily dilate the larger component
+#                          during the overlap test. 0 disables it.
 DEFAULT_RECO_OVERLAP_MODE     = "trim"
 DEFAULT_RECO_OVERLAP_KILL_THR = 0.3
-DEFAULT_RECO_TRIM_DILATE_PX   = 2
+DEFAULT_RECO_TRIM_DILATE_PX   = 0
 
 # ── Preprocess (stage 2) ──────────────────────────────────────────────────
 DEFAULT_PRE_BIN_THRESHOLD    = 127  # grayscale threshold for binarising branch masks
@@ -87,7 +86,9 @@ DEFAULT_ABSORB_RADIUS      = 6    # halo radius (px) for neighbour detection dur
 DEFAULT_BRIDGE_RADIUS      = 12   # re-join same-source split pieces within this radius
 DEFAULT_OVERLAY_ALPHA      = 0.72 # overlay blend (0 = background only, 1 = labels only)
 DEFAULT_OVERLAP_ABSORB_THR = 0.6  # 0=disabled. 0.6-0.7 absorbs near-duplicate IDs into the larger
-DEFAULT_TIP_TRIM_FRAC      = 0.15  # 0=disabled. ~0.15 trims overlap pixels near an ID's skeleton tip
+DEFAULT_OCCLUSION_TRIM_THR = 0.25 # trim lower-priority layers mostly hidden by earlier layers
+DEFAULT_OCCLUSION_TRIM_MIN_PX = 50 # hidden rendered pixels required before occlusion trim triggers
+DEFAULT_TIP_TRIM_FRAC      = 0.10  # 0=disabled. ~0.15 trims overlap pixels near an ID's skeleton tip
 
 # ── DEM JSON ──────────────────────────────────────────────────────────────
 DEFAULT_POLYLINE_STEP = 1   # keep every Nth centerline point in DEM JSON (1 = all)
@@ -108,7 +109,12 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--base", default=None, help="Output base name. Defaults to mask stem.")
     ap.add_argument("--python", default=sys.executable)
     # reconnect
-    ap.add_argument("--reconnect-version", default=DEFAULT_RECONNECT_VERSION, choices=["straight", "curvy"])
+    ap.add_argument(
+        "--reconnect-version",
+        default=DEFAULT_RECONNECT_VERSION,
+        choices=["straight"],
+        help="Compatibility option; only the straight reconnect evaluator is supported.",
+    )
     ap.add_argument("--reco-overlap-mode", type=str, default=DEFAULT_RECO_OVERLAP_MODE,
                     choices=["kill", "trim"],
                     help='Reconnect overlap-handling mode. "trim" keeps viable sub-components of '
@@ -141,6 +147,11 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--overlap-absorb-thr", type=float, default=DEFAULT_OVERLAP_ABSORB_THR,
                     help="Postprocess: absorb near-duplicate IDs whose intersection covers >= this "
                          "fraction of the smaller. 0 disables. Try 0.6-0.7.")
+    ap.add_argument("--occlusion-trim-thr", type=float, default=DEFAULT_OCCLUSION_TRIM_THR,
+                    help="Postprocess: trim lower-priority layers whose rendered pixels are mostly "
+                         "already covered. 0 disables.")
+    ap.add_argument("--occlusion-trim-min-px", type=int, default=DEFAULT_OCCLUSION_TRIM_MIN_PX,
+                    help="Postprocess: minimum hidden rendered pixels before occlusion trimming triggers.")
     ap.add_argument("--tip-trim-frac", type=float, default=DEFAULT_TIP_TRIM_FRAC,
                     help="Postprocess: erase overlap pixels at an ID's skeleton tip when overlap is "
                          "tip-dominant. 0 disables. Try 0.15.")
@@ -400,6 +411,8 @@ def main() -> None:
         "--same-source-bridge-radius",  str(args.bridge_radius),
         "--overlay-alpha",              str(args.overlay_alpha),
         "--overlap-absorb-thr",         str(args.overlap_absorb_thr),
+        "--occlusion-trim-thr",         str(args.occlusion_trim_thr),
+        "--occlusion-trim-min-px",      str(args.occlusion_trim_min_px),
         "--tip-trim-frac",              str(args.tip_trim_frac),
     ])
 

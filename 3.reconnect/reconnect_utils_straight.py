@@ -29,6 +29,7 @@ _LOG_COLUMNS = [
     "dist", "forward_base", "forward_tar", "inward_opposition",
     "width_ratio", "line_resid", "arc_miss_frac", "curv_delta",
     "intrusion_frac", "smooth_rms", "max_turn_deg",
+    "base_tip_count", "tar_tip_count", "layer_gap",
 ]
 
 
@@ -139,6 +140,40 @@ def _neighbors8(skel: np.ndarray, p: Coord) -> List[Coord]:
             if 0 <= rr < skel.shape[0] and 0 <= cc < skel.shape[1] and skel[rr, cc]:
                 out.append((rr, cc))
     out.sort(key=lambda x: (x[1], x[0]))
+    return out
+
+
+def _prune_short_skeleton_spurs(skel: np.ndarray, max_spur_px: int, passes: int = 2) -> np.ndarray:
+    """Remove short terminal branches that reach a junction within max_spur_px."""
+    if max_spur_px <= 0:
+        return skel.astype(bool)
+    out = skel.astype(bool).copy()
+    for _ in range(max(1, int(passes))):
+        remove: set[Coord] = set()
+        for ep in [tuple(int(v) for v in p) for p in endpoints_from_skeleton(out)]:
+            path: List[Coord] = [ep]
+            prev: Optional[Coord] = None
+            cur: Coord = ep
+            hit_junction = False
+            for _step in range(int(max_spur_px)):
+                nbs = [p for p in _neighbors8(out, cur) if p != prev]
+                if not nbs:
+                    break
+                if len(nbs) > 1:
+                    hit_junction = True
+                    break
+                nxt = nbs[0]
+                prev, cur = cur, nxt
+                if len(_neighbors8(out, cur)) >= 3:
+                    hit_junction = True
+                    break
+                path.append(cur)
+            if hit_junction:
+                remove.update(path)
+        if not remove:
+            break
+        rr, cc = zip(*remove)
+        out[np.asarray(rr), np.asarray(cc)] = False
     return out
 
 
@@ -485,13 +520,28 @@ class Component:
     bbox: Tuple[int, int, int, int] = (0, -1, 0, -1)
     tips: Dict[str, Dict[str, object]] = None
 
-    def refresh_geom(self, trace_steps: int, fit_points: int, *, max_tips: Optional[int] = None, min_tip_trace_len: float = 3.0):
+    def refresh_geom(
+        self,
+        trace_steps: int,
+        fit_points: int,
+        *,
+        max_tips: Optional[int] = None,
+        min_tip_trace_len: float = 3.0,
+        prune_spur_px: int = 0,
+        dedupe_sep_px: float = 2.0,
+    ):
         self.skel = skeletonize(self.mask)
+        skel_px = int(np.count_nonzero(self.skel))
+        if prune_spur_px > 0:
+            self.skel = _prune_short_skeleton_spurs(self.skel, int(prune_spur_px))
+            if int(np.count_nonzero(self.mask)) <= skel_px + int(prune_spur_px) + 2:
+                self.mask = self.skel.copy()
         self.tips = _enumerate_tip_geoms(
             self.skel, self.mask,
             trace_steps=trace_steps, fit_points=fit_points,
             max_tips=8 if max_tips is None else int(max_tips),
-            min_tip_trace_len=float(min_tip_trace_len), dedupe_sep_px=2.0,
+            min_tip_trace_len=float(min_tip_trace_len),
+            dedupe_sep_px=float(dedupe_sep_px),
         )
 
         names = list(self.tips.keys())
@@ -722,7 +772,7 @@ def _evaluate_tip_pair(
     global_label: np.ndarray, cfg: Dict,
 ) -> Optional[Proposal]:
     thr = cfg.get("thresholds", {})
-    adv = cfg.get("advanced", {})
+    geom = cfg.get("geometry", {})
     wgt = cfg.get("weights", {})
 
     bp, bd, bcurv, btrace = _tip_data(base, base_tip_name)
@@ -742,9 +792,9 @@ def _evaluate_tip_pair(
 
     bp_arr = np.asarray([float(bp[0]), float(bp[1])], dtype=np.float32)
     tp_arr = np.asarray([float(tp[0]), float(tp[1])], dtype=np.float32)
-    if _tip_trace_length(btrace) < float(adv.get("min_tip_trace_len_px", 3.0)):
+    if _tip_trace_length(btrace) < float(geom.get("min_tip_trace_len_px", 3.0)):
         return reject("tip_trace_too_short")
-    if _tip_trace_length(ttrace) < float(adv.get("min_tip_trace_len_px", 3.0)):
+    if _tip_trace_length(ttrace) < float(geom.get("min_tip_trace_len_px", 3.0)):
         return reject("tip_trace_too_short")
 
     dvec = tp_arr - bp_arr
@@ -761,24 +811,71 @@ def _evaluate_tip_pair(
     width_ratio       = float(max(base.mean_width, tar.mean_width) / max(1e-6, min(base.mean_width, tar.mean_width)))
     line_resid        = 0.5 * (_perp_distance_point_to_line(tp, bp, -bd) + _perp_distance_point_to_line(bp, tp, td))
     curv_delta        = float(abs(bcurv - tcurv))
+    raw_layer_gap     = abs(int(base.layer) - int(tar.layer))
+    layer_count       = int(cfg.get("_orientation_layer_count", 0) or 0)
+    layer_gap         = min(raw_layer_gap, layer_count - raw_layer_gap) if layer_count > 1 else raw_layer_gap
 
     rec.update({
         "forward_base": forward_base, "forward_tar": forward_tar,
         "inward_opposition": inward_opposition, "width_ratio": width_ratio,
         "line_resid": line_resid, "curv_delta": curv_delta,
+        "base_tip_count": int(len(base.tips or {})),
+        "tar_tip_count": int(len(tar.tips or {})),
+        "layer_gap": int(layer_gap),
     })
 
     min_forward_cos       = float(thr.get("min_forward_cos",       0.65))
     min_inward_opposition = float(thr.get("min_inward_opposition", 0.60))
     max_line_residual     = float(thr.get("max_line_residual_px",  8.0))
+    merge_mode            = str(thr.get("merge_mode", "normal")).lower().strip()
 
-    # Clear-merge fast path: adjacent tips from different orientation bins have
-    # tip directions pointing along their own bin angle, not toward the bridge.
-    # For dist <= threshold we bypass forward/opposition and score with high
-    # priority (negative scalar) so these always merge before longer gaps.
+    # Clear-merge fast path: close collinear endpoints can have unstable
+    # tangent signs after skeletonization/spline cleanup. For these tiny gaps,
+    # distance + residual + optional opposition are more reliable than the
+    # forward and turn gates.
     _cm_max_dist  = float(thr.get("clear_merge_max_dist_px",   0.0))
     _cm_max_resid = float(thr.get("clear_merge_max_line_resid_px", 4.0))
-    _is_clear = _cm_max_dist > 0.0 and dist <= _cm_max_dist and line_resid <= _cm_max_resid
+    _cm_min_opp   = float(thr.get("clear_merge_min_opposition", -1.0))
+    _cm_multitip_min_fwd = float(thr.get("clear_merge_multitip_min_forward_cos", 0.0))
+    _cm_backward_max_layer_gap = int(thr.get("clear_merge_backward_max_layer_gap", 4))
+    _tip_count = max(len(base.tips or {}), len(tar.tips or {}))
+    _is_clear = (
+        _cm_max_dist > 0.0
+        and dist <= _cm_max_dist
+        and line_resid <= _cm_max_resid
+        and (-inward_opposition) >= _cm_min_opp
+    )
+    if merge_mode in {"clear", "clear_merge"} and not _is_clear:
+        return reject("not_clear_merge")
+    if merge_mode not in {"clear", "clear_merge"}:
+        _is_clear = False
+    if (
+        _is_clear
+        and _tip_count > 2
+        and (forward_base < _cm_multitip_min_fwd or forward_tar < _cm_multitip_min_fwd)
+    ):
+        return reject("clear_merge_multitip_forward")
+    if (
+        _is_clear
+        and forward_base < 0.0
+        and forward_tar < 0.0
+        and layer_gap > _cm_backward_max_layer_gap
+    ):
+        return reject("clear_merge_backward_layer_gap")
+
+    # Same orientation-layer pieces are often one spline-cleaned branch split
+    # by an overlap/gap. Let them tolerate a larger straight residual only when
+    # both tips still strongly face the bridge and oppose each other.
+    _same_layer_max_resid = float(thr.get("same_layer_max_line_resid_px", max_line_residual))
+    _same_layer_min_fwd   = float(thr.get("same_layer_min_forward_cos", min_forward_cos))
+    _same_layer_min_opp   = float(thr.get("same_layer_min_opposition", min_inward_opposition))
+    _is_same_layer_relaxed = (
+        base.layer == tar.layer
+        and line_resid <= _same_layer_max_resid
+        and forward_base >= _same_layer_min_fwd
+        and forward_tar >= _same_layer_min_fwd
+        and (-inward_opposition) >= _same_layer_min_opp
+    )
 
     if not _is_clear:
         if forward_base < min_forward_cos or forward_tar < min_forward_cos:
@@ -787,14 +884,14 @@ def _evaluate_tip_pair(
             return reject("opposition")
     if width_ratio > float(thr.get("max_width_ratio", 3.0)):
         return reject("width_ratio")
-    if line_resid > max_line_residual:
+    if line_resid > max_line_residual and not _is_same_layer_relaxed:
         return reject("line_residual")
     if curv_delta > float(thr.get("max_curvature_delta", 0.15)):
         return reject("curv_delta")
 
     max_arc_miss_frac = float(thr.get("max_arc_miss_frac", 1.0))
     arc_miss_frac_val = -1.0
-    if max_arc_miss_frac < 0.99 and dist > 4.0:
+    if (not _is_clear) and max_arc_miss_frac < 0.99 and dist > 4.0:
         b_extra = (base.tips or {}).get(base_tip_name, {}).get("extra", None)
         t_extra = (tar.tips  or {}).get(tar_tip_name,  {}).get("extra", None)
         if b_extra is not None and t_extra is not None:
@@ -811,11 +908,11 @@ def _evaluate_tip_pair(
 
     bridge_pts = _sample_hermite_bridge(
         bp, tp, -bd, td,
-        n_samples=int(adv.get("bridge_samples", 24)),
-        tangent_scale=float(adv.get("bridge_tangent_scale", 0.35)),
+        n_samples=int(geom.get("bridge_samples", 24)),
+        tangent_scale=float(geom.get("bridge_tangent_scale", 0.35)),
     )
     bridge_mask = _polyline_mask(bridge_pts, base.mask.shape)
-    clearance_px = int(max(0, adv.get("bridge_clearance_px", 1)))
+    clearance_px = int(max(0, geom.get("bridge_clearance_px", 1)))
     bridge_eval  = binary_dilation(bridge_mask, iterations=clearance_px) if clearance_px > 0 else bridge_mask
     touched = global_label[bridge_eval]
     touched = touched[(touched != 0) & (touched != base.id) & (touched != tar.id)]
@@ -824,7 +921,7 @@ def _evaluate_tip_pair(
     if intrusion_frac > float(thr.get("max_bridge_intrusion_frac", 0.10)):
         return reject("bridge_intrusion")
 
-    tp_pts = int(adv.get("smooth_trace_points", 18))
+    tp_pts = int(geom.get("smooth_trace_points", 18))
     smooth_rms, smooth_curv, max_turn_deg = _local_smoothness_metrics(
         btrace[:tp_pts] if btrace is not None else btrace,
         bridge_pts,
@@ -832,9 +929,9 @@ def _evaluate_tip_pair(
         fit_degree=2,
     )
     rec.update({"smooth_rms": float(smooth_rms), "max_turn_deg": float(max_turn_deg)})
-    if smooth_rms > float(thr.get("max_smooth_rms_px", 3.5)):
+    if (not _is_clear) and smooth_rms > float(thr.get("max_smooth_rms_px", 3.5)):
         return reject("smooth_rms")
-    if max_turn_deg > float(thr.get("max_turn_deg", 45.0)):
+    if (not _is_clear) and max_turn_deg > float(thr.get("max_turn_deg", 45.0)):
         return reject("max_turn")
 
     rec["reason"] = "accepted"
@@ -886,6 +983,7 @@ def reconnect_components(components: List[Component], cfg: Dict) -> List[Compone
     log_path   = debug_cfg.get("rejection_log_path")
     prev_stage = _CURRENT_STAGE
     _CURRENT_STAGE = str(debug_cfg.get("stage_label", ""))
+    cfg["_orientation_layer_count"] = max((int(c.layer) for c in components), default=-1) + 1
     if log_path:
         _open_rejection_log(str(log_path))
 
@@ -900,7 +998,7 @@ def reconnect_components(components: List[Component], cfg: Dict) -> List[Compone
 def _reconnect_components_inner(components: List[Component], cfg: Dict) -> List[Component]:
     thr     = cfg.get("thresholds", {})
     runtime = cfg.get("runtime", {})
-    adv     = cfg.get("advanced", {})
+    geom    = cfg.get("geometry", {})
     morph   = cfg.get("morphology", {})
 
     verbose              = bool(runtime.get("verbose", True))
@@ -909,8 +1007,8 @@ def _reconnect_components_inner(components: List[Component], cfg: Dict) -> List[
     print_every_pass     = int(runtime.get("print_every_pass", 1))
     print_every_merge    = int(runtime.get("print_every_merge", 10))
 
-    trace_steps        = int(max(4, adv.get("trace_steps", morph.get("tip_dir_steps", 20))))
-    fit_points         = int(max(4, adv.get("fit_points", 12)))
+    trace_steps        = int(max(4, geom.get("trace_steps", morph.get("tip_dir_steps", 20))))
+    fit_points         = int(max(4, geom.get("fit_points", 12)))
     search_size        = int(thr.get("search_size_px", 25))
     candidate_layers   = str(thr.get("candidate_layers", "all")).lower().strip()
     overlap_kill_thr   = float(thr.get("overlap_kill_thr", 0.70))
@@ -927,12 +1025,18 @@ def _reconnect_components_inner(components: List[Component], cfg: Dict) -> List[
     # Back-compat alias from earlier experiment naming.
     if overlap_mode == "trim_largest":
         overlap_mode = "trim"
-    max_component_tips = int(adv.get("max_component_tips", 8))
-    min_tip_trace_len  = float(adv.get("min_tip_trace_len_px", 3.0))
+    max_component_tips = int(geom.get("max_component_tips", 8))
+    min_tip_trace_len  = float(geom.get("min_tip_trace_len_px", 3.0))
+    refresh_kwargs = dict(
+        max_tips=max_component_tips,
+        min_tip_trace_len=min_tip_trace_len,
+        prune_spur_px=int(geom.get("tip_prune_spur_px", 0)),
+        dedupe_sep_px=float(geom.get("tip_dedupe_sep_px", 2.0)),
+    )
     trim_dilate_px     = int(morph.get("trim_dilate_px", 0))
 
     for c in components:
-        c.refresh_geom(trace_steps, fit_points, max_tips=max_component_tips, min_tip_trace_len=min_tip_trace_len)
+        c.refresh_geom(trace_steps, fit_points, **refresh_kwargs)
 
     def _alive() -> List[Component]:
         return [c for c in components if c.exist]
@@ -986,11 +1090,10 @@ def _reconnect_components_inner(components: List[Component], cfg: Dict) -> List[
           threshold are dropped.
 
         If `morphology.trim_dilate_px > 0`, the LARGER component is temporarily
-        dilated by that many px for the overlap test and the pixel-subtraction
-        step. The dilation is NOT persisted to the larger component's actual
-        mask — it's purely a halo used to catch adjacent-but-not-yet-overlapping
-        small pieces. This lets us absorb thin slivers that sit just next to a
-        bigger bundle but technically don't share pixels yet.
+        dilated by that many px for the overlap test only. The dilation is NOT
+        persisted to the larger component's actual mask and is not subtracted
+        from the smaller mask, which avoids cutting real adjacent filament
+        pixels into artificial gaps.
         """
         from scipy.ndimage import binary_dilation as _bdil
         alive = sorted(_alive(), key=lambda z: (-int(z.mask.sum()), z.id))
@@ -1021,9 +1124,13 @@ def _reconnect_components_inner(components: List[Component], cfg: Dict) -> List[
                     continue
 
                 if overlap_mode == "trim":
-                    # Subtract the dilated big from small (so a sliver right
-                    # next to big also gets carved away).
-                    trimmed = small.mask & ~big_eff
+                    # Use the halo for detection/scoring only. Subtracting the
+                    # dilated mask itself can carve real adjacent filament
+                    # pixels and create artificial gaps; the actual trim should
+                    # remove only pixels already covered by the larger component.
+                    trimmed = small.mask & ~big.mask
+                    if np.array_equal(trimmed, small.mask):
+                        continue
                     kept_masks: List[np.ndarray] = []
                     if trimmed.any():
                         cc = cc_label(trimmed, connectivity=2)
@@ -1042,17 +1149,13 @@ def _reconnect_components_inner(components: List[Component], cfg: Dict) -> List[
                         new_n = 0
                     else:
                         small.mask = kept_masks[0]
-                        small.refresh_geom(trace_steps, fit_points,
-                                           max_tips=max_component_tips,
-                                           min_tip_trace_len=min_tip_trace_len)
+                        small.refresh_geom(trace_steps, fit_points, **refresh_kwargs)
                         # Spawn fresh Components for the remaining viable fragments.
                         for extra in kept_masks[1:]:
                             new_id = max((c.id for c in components), default=0) + 1
                             new_comp = Component(id=new_id, layer=small.layer,
                                                  mask=extra, exist=True)
-                            new_comp.refresh_geom(trace_steps, fit_points,
-                                                  max_tips=max_component_tips,
-                                                  min_tip_trace_len=min_tip_trace_len)
+                            new_comp.refresh_geom(trace_steps, fit_points, **refresh_kwargs)
                             components.append(new_comp)
                         new_n = len(kept_masks) - 1
                 else:   # legacy kill behavior
@@ -1070,8 +1173,6 @@ def _reconnect_components_inner(components: List[Component], cfg: Dict) -> List[
         return events
 
     pass_idx = total_merges = total_kills = 0
-    refresh_kwargs = dict(max_tips=max_component_tips, min_tip_trace_len=min_tip_trace_len)
-
     while pass_idx < max_passes:
         pass_idx += 1
         if verbose and pass_idx % print_every_pass == 0:

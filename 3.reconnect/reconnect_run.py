@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import copy
-import importlib
 import json
 import re
 from pathlib import Path
@@ -28,9 +27,9 @@ def parse_args():
     ap.add_argument(
         "--version",
         type=str,
-        choices=["straight", "curvy"],
+        choices=["straight"],
         default="straight",
-        help="Which evaluator to use: straight (standard) or curvy (arc-aware).",
+        help="Compatibility option; only the straight evaluator is supported.",
     )
     ap.add_argument("--input", type=str, default=None, help="override input_dir")
     ap.add_argument("--output", type=str, default=None, help="override output_dir")
@@ -439,7 +438,8 @@ def _resolve_config_path(config_arg: str) -> Path:
 def main():
     args = parse_args()
 
-    utils = importlib.import_module(f"reconnect_utils_{args.version}")
+    import reconnect_utils_straight as utils
+
     read_gray_any          = utils.read_gray_any
     binarize_mask          = utils.binarize_mask
     extract_components     = utils.extract_components
@@ -453,17 +453,6 @@ def main():
 
     cfg_path = _resolve_config_path(args.config)
     cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
-
-    # Merge curvy-mode overrides from the [curvy] section of the config.
-    if args.version == "curvy" and "curvy" in cfg:
-        curvy_overrides = cfg.pop("curvy")
-        for key, val in curvy_overrides.items():
-            if isinstance(val, dict) and isinstance(cfg.get(key), dict):
-                cfg[key] = {**cfg[key], **val}
-            else:
-                cfg[key] = val
-    else:
-        cfg.pop("curvy", None)
 
     io_cfg = cfg.get("io", {})
     input_dir = Path(args.input or io_cfg.get("input_dir", "./input")).resolve()
@@ -482,14 +471,24 @@ def main():
         cfg.setdefault("morphology", {})["dilate_px"] = dilate_auto
         print(f"[reconnect-{args.version}] filament_width={width_hint:.2f}px from config -> dilate_px={dilate_auto}")
 
-    # Two-stage setup
-    has_stages = "stage1" in cfg and "stage2" in cfg
-    if has_stages:
-        cfg1 = _make_stage_cfg(cfg, "stage1")
-        cfg2 = _make_stage_cfg(cfg, "stage2")
-        print(f"[reconnect-{args.version}] two-stage: "
-              f"stage1={cfg1['runtime']['max_passes']} passes (strict), "
-              f"stage2={cfg2['runtime']['max_passes']} passes (relaxed)")
+    # Reconnect stages are deliberately ordered from safest to broadest:
+    #   clear_merge            -> tiny, straight, high-confidence gaps only
+    #   strict_tip_reconnect   -> current short-gap reconnect gates
+    #   relaxed_tip_reconnect  -> current wider-gap reconnect gates
+    if all(k in cfg for k in ("stage_clear", "stage_strict", "stage_relaxed")):
+        stage_keys = ["stage_clear", "stage_strict", "stage_relaxed"]
+    elif "stage1" in cfg and "stage2" in cfg:
+        stage_keys = ["stage1", "stage2"]
+    else:
+        stage_keys = []
+    stage_cfgs = [(k, _make_stage_cfg(cfg, k)) for k in stage_keys]
+    if stage_cfgs:
+        desc = ", ".join(
+            f"{scfg.get('runtime', {}).get('stage_name', key)}="
+            f"{scfg.get('runtime', {}).get('max_passes', '?')} passes"
+            for key, scfg in stage_cfgs
+        )
+        print(f"[reconnect-{args.version}] staged reconnect: {desc}")
 
     print(f"[reconnect-{args.version}] input_dir:", input_dir)
 
@@ -504,8 +503,7 @@ def main():
     morph = cfg["morphology"]
     outcfg = cfg["outputs"]
     pre = cfg.get("preprocess", {})
-    adv = cfg.get("advanced", {})
-    component_mask_mode = str(adv.get("component_mask_mode", "full")).strip().lower()
+    component_mask_mode = str(pre.get("component_mask_mode", "full")).strip().lower()
 
     for base in bases:
         merged_path = _pick_existing_by_preference(input_dir, f"{base}_branches_merge")
@@ -572,11 +570,11 @@ def main():
             print(f"[reconnect-{args.version}] '{base}': no components after thresholding")
             continue
 
-        if has_stages:
-            print(f"[reconnect-{args.version}] stage 1 (strict)...")
-            components = reconnect_components(components, cfg1)
-            print(f"[reconnect-{args.version}] stage 2 (relaxed)...")
-            components = reconnect_components(components, cfg2)
+        if stage_cfgs:
+            for idx, (stage_key, stage_cfg) in enumerate(stage_cfgs, start=1):
+                stage_name = stage_cfg.get("runtime", {}).get("stage_name", stage_key)
+                print(f"[reconnect-{args.version}] stage {idx}: {stage_name}...")
+                components = reconnect_components(components, stage_cfg)
         else:
             components = reconnect_components(components, cfg)
         lbl, layers = relabel_components(components, return_layers=True)

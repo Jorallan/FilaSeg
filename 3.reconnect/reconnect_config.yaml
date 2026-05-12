@@ -6,46 +6,40 @@ shared:
   filament_width_px: null        # set by stringart when available
 
 thresholds:
+  # Shared extraction, candidate search, and overlap cleanup defaults.
+  # Reconnect geometry gates are stage-local below.
   branch_bin: 0.5                # binary mask threshold
   min_component_area: 15         # smallest kept component or trimmed fragment
   overlap_kill_thr: 0.3          # overlap fraction above which kill/trim action triggers
+  overlap_mode: trim             # kill = drop smaller overlap; trim = keep viable non-overlap fragments
   search_size_px: 40             # local candidate search window
   candidate_layers: all          # branch layers to compare
-  max_tip_distance_px: 40        # farthest tip pair distance
-  min_forward_cos: 0.82          # minimum forward alignment
-  min_inward_opposition: 0.5     # minimum tip opposition
   max_width_ratio: 2.75          # maximum width mismatch
-  max_line_residual_px: 8        # maximum straight-line residual
-  max_curvature_delta: 0.16      # maximum curvature mismatch
-  max_bridge_intrusion_frac: 0.2 # allowed crossing intrusion
-  max_smooth_rms_px: 6.0         # maximum bridge roughness
-  max_turn_deg: 65.0             # maximum join angle
-  max_arc_miss_frac: 0.65        # straight arc extrapolation gate
-  clear_merge_max_dist_px: 3.0   # bypass forward/opposition for tiny inter-bin gaps
-  clear_merge_max_line_resid_px: 4.0 # collinearity gate for clear merge
-  overlap_mode: trim             # kill = drop smaller overlap; trim = keep viable non-overlap fragments
 
 morphology:
   dilate_px: 1                   # label dilation radius
   tip_dir_steps: 10              # pixels used for tip direction
-  trim_dilate_px: 2              # temporary larger-component halo for overlap trim/kill checks
+  trim_dilate_px: 0              # 0 disables halo; >0 uses a temporary larger-component overlap-test halo
 
 preprocess:
   clean_min_area: 5              # smallest pre-score component
   skeletonize_components: true   # score skeletonized components
+  component_mask_mode: skeletonized # mask used for component scoring
   split_at_branchpoints: false   # split skeleton branch junctions
   bp_dilate_px: 2                # branchpoint split radius
 
-advanced:
+geometry:
+  # Shared tip tracing, bridge sampling, and endpoint cleanup settings.
   trace_steps: 28                # tip trace length
   fit_points: 12                 # points for local fit
   smooth_trace_points: 22        # trace points for smoothness
   bridge_samples: 24             # sampled bridge points
   bridge_tangent_scale: 0.3      # Hermite handle length
   bridge_clearance_px: 0         # extra bridge clearance
-  component_mask_mode: skeletonized # mask used for component scoring
   max_component_tips: 16         # maximum tips per component
   min_tip_trace_len_px: 0.0      # minimum usable tip trace
+  tip_prune_spur_px: 3           # remove skeleton spurs that rejoin a junction within this many px
+  tip_dedupe_sep_px: 4.0         # cluster endpoint tips closer than this after support scoring
 
 weights:
   distance: 1.0                  # distance score weight
@@ -76,22 +70,52 @@ runtime:
   max_merges_per_pass: 100       # merge cap per pass
   max_passes: 10                 # fallback pass cap
 
-stage1:
+# Stage 1: clear_merge
+# Tiny, straight, high-confidence endpoint gaps only
+stage_clear:
   runtime:
+    stage_name: clear_merge      # short clean-gap pass
+    max_passes: 6                # clear-merge pass count
+  thresholds:
+    merge_mode: clear            # only clear-merge candidates can be accepted
+    max_tip_distance_px: 16      # search cap for clear gaps
+    max_curvature_delta: 0.16    # reject mismatched local curvature even for clear gaps
+    max_bridge_intrusion_frac: 0.22 # short-gap intrusion cap
+    clear_merge_max_dist_px: 16.0 # clear merge distance cap
+    clear_merge_max_line_resid_px: 6.0 # clear merge residual cap
+    clear_merge_min_opposition: 0.6 # clear merge opposition
+    clear_merge_multitip_min_forward_cos: 0.0 # require non-backward clear merges into multi-tip components
+    clear_merge_backward_max_layer_gap: 4 # block backward clear merges across distant circular orientation bins
+
+# Stage 2: strict_tip_reconnect
+# Close endpoint reconnects with normal forward, opposition, residual, smoothness, and turn gates.
+stage_strict:
+  runtime:
+    stage_name: strict_tip_reconnect # previous strict/short reconnect pass
     max_passes: 8                # short-gap pass count
   thresholds:
+    merge_mode: normal           # use the full normal evaluator
     max_tip_distance_px: 15      # short-gap distance cap
     min_forward_cos: 0.85        # stricter forward alignment
     min_inward_opposition: 0.55  # stricter tip opposition
     max_turn_deg: 45.0           # short-gap turn cap
     max_line_residual_px: 6      # short-gap residual cap
+    max_curvature_delta: 0.16    # short-gap curvature cap
     max_bridge_intrusion_frac: 0.22 # short-gap intrusion cap
+    max_smooth_rms_px: 6.0       # short-gap smoothness cap
     max_arc_miss_frac: 0.55      # short-gap arc miss cap
+    same_layer_max_line_resid_px: 20.0 # relaxed residual cap for same orientation-layer splits
+    same_layer_min_forward_cos: 0.88 # forward gate for same-layer residual relaxation
+    same_layer_min_opposition: 0.85 # opposition gate for same-layer residual relaxation
 
-stage2:
+# Stage 3: relaxed_tip_reconnect
+# Wider search with relaxed gates for longer but still smooth/consistent endpoint bridges.
+stage_relaxed:
   runtime:
+    stage_name: relaxed_tip_reconnect # previous relaxed/wider reconnect pass
     max_passes: 6                # wider pass count
   thresholds:
+    merge_mode: normal           # use the full normal evaluator
     max_tip_distance_px: 55      # wider distance cap
     min_forward_cos: 0.72        # relaxed forward alignment
     min_inward_opposition: 0.4   # relaxed tip opposition
@@ -101,75 +125,6 @@ stage2:
     max_bridge_intrusion_frac: 0.32 # wider intrusion cap
     max_smooth_rms_px: 5.5       # wider smoothness cap
     max_arc_miss_frac: 0.75      # wider arc miss cap
-
-# -----------------------------------------------------------------------------
-# CURVY-mode overrides (used when --version curvy)
-# -----------------------------------------------------------------------------
-curvy:
-  thresholds:
-    search_size_px: 45           # curvy search window
-    max_tip_distance_px: 45      # curvy distance cap
-    min_forward_cos: 0.78        # curvy forward alignment
-    min_inward_opposition: 0.45  # curvy tip opposition
-    max_line_residual_px: 10     # curvy residual cap
-    max_curvature_delta: 0.18    # curvy curvature cap
-    max_smooth_rms_px: 6.5       # curvy smoothness cap
-    max_arc_miss_frac: 0.65      # legacy arc miss gate
-    max_arc_miss_px: 15.0        # absolute arc miss cap
-    max_turn_deg_hard_cap: 48.0  # hard turn ceiling
-    max_turn_deg_arc_rescue: 32.0 # arc-rescue turn cap
-    clear_merge_max_dist_px: 15.0 # clear merge distance cap
-    clear_merge_max_line_resid_px: 4.0 # clear merge residual cap
-    clear_merge_max_arc_miss_px: 5.0 # clear merge arc cap
-    clear_merge_min_opposition: 0.85 # clear merge opposition
-    clear_merge_max_turn_deg: 70.0 # clear merge turn cap
-    same_dir_absorb_max_dist_px: 4.0 # duplicate absorb distance
-    same_dir_absorb_max_line_resid_px: 2.5 # duplicate absorb residual
-    same_dir_absorb_max_arc_miss_px: 5.0 # duplicate absorb arc cap
-    same_dir_absorb_min_parallel: 0.9 # duplicate parallel minimum
-    same_dir_absorb_max_turn_deg: 180.0 # duplicate turn allowance
-  advanced:
-    fit_points: 14               # curvy fit points
-    bridge_tangent_scale: 0.14   # curvy bridge handle length
-    curv_relax_factor: 30.0      # curvature relaxation scale
-    max_curv_relax: 0.3          # maximum relaxation amount
-  weights:
-    forward: 2.2                 # curvy forward weight
-    opposition: 1.2              # curvy opposition weight
-    line_residual: 2.0           # curvy residual weight
-    curvature_delta: 0.45        # curvy curvature weight
-    smooth_rms: 2.4              # curvy smoothness weight
-    smooth_curvature: 1.0        # curvy curvature smoothness
-    arc_miss: 0.8                # curvy arc miss weight
-  debug:
-    rejection_log_path: output/reconnect_rejection_log.csv # curvy candidate log
-  stage1:
-    runtime:
-      max_passes: 4              # curvy short-gap passes
-    thresholds:
-      max_tip_distance_px: 20    # curvy short distance cap
-      min_forward_cos: 0.88      # curvy short forward gate
-      min_inward_opposition: 0.55 # curvy short opposition
-      max_turn_deg: 45.0         # curvy short turn cap
-      max_line_residual_px: 5    # curvy short residual cap
-      max_arc_miss_px: 10.0      # curvy short arc cap
-      max_bridge_intrusion_frac: 0.15 # curvy short intrusion
-    advanced:
-      curv_relax_factor: 15.0    # curvy short relaxation
-      max_curv_relax: 0.15       # curvy short max relaxation
-  stage2:
-    runtime:
-      max_passes: 6              # curvy wider passes
-    thresholds:
-      max_tip_distance_px: 60    # curvy wider distance cap
-      min_forward_cos: 0.72      # curvy wider forward gate
-      min_inward_opposition: 0.38 # curvy wider opposition
-      max_turn_deg: 45.0         # curvy wider turn cap
-      max_line_residual_px: 12   # curvy wider residual cap
-      max_curvature_delta: 0.22  # curvy wider curvature cap
-      max_bridge_intrusion_frac: 0.25 # curvy wider intrusion
-      max_smooth_rms_px: 5.0     # curvy wider smoothness
-      max_arc_miss_px: 12.0      # curvy wider arc cap
-    advanced:
-      curv_relax_factor: 25.0    # curvy wider relaxation
-      max_curv_relax: 0.2        # curvy wider max relaxation
+    same_layer_max_line_resid_px: 20.0 # relaxed residual cap for same orientation-layer splits
+    same_layer_min_forward_cos: 0.88 # forward gate for same-layer residual relaxation
+    same_layer_min_opposition: 0.85 # opposition gate for same-layer residual relaxation

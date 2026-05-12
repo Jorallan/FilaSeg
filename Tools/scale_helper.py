@@ -30,13 +30,10 @@ PX_LINEAR_KEYS = frozenset({
     # thresholds
     "search_size_px", "max_tip_distance_px", "max_line_residual_px",
     "max_smooth_rms_px", "clear_merge_max_dist_px",
-    "clear_merge_max_line_resid_px", "clear_merge_max_arc_miss_px",
-    "max_arc_miss_px", "min_tip_trace_len_px",
-    "same_dir_absorb_max_dist_px", "same_dir_absorb_max_line_resid_px",
-    "same_dir_absorb_max_arc_miss_px",
+    "clear_merge_max_line_resid_px", "min_tip_trace_len_px",
     # morphology
     "dilate_px", "bp_dilate_px", "tip_dir_steps",
-    # advanced (skeleton step counts proportional to pixel distance)
+    # reconnect geometry (skeleton step counts proportional to pixel distance)
     "trace_steps", "fit_points", "smooth_trace_points", "bridge_samples",
     "bridge_clearance_px",
 })

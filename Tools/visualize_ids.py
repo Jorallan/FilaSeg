@@ -18,7 +18,7 @@ from skimage.segmentation import find_boundaries
 
 LABEL_PRIORITY  = ["*_post_labels.tif", "*_reconnect_labels.tif", "*_labels.tif", "*.tif"]
 BG_PRIORITY     = ["*_original.*", "*_post_overlay.png", "*_reconnect_overlay.png", "*_overlay.png", "*_preview.png"]
-DEFAULT_INPUT = Path(r"C:\Repos\filaments_quantification\output\full_pipeline\sem00000_crop512_multigrid4_autotune\final")
+DEFAULT_INPUT = Path(r"C:\Repos\filaments_quantification\output\full_pipeline\sem_full_00000_1p66_crop512_20260512_153551\final")
 
 
 def find_first(folder: Path, patterns: list[str]) -> Path | None:

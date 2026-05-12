@@ -7,7 +7,7 @@ This repository is being shaped into a CNT bundle extraction pipeline:
 1. Start with a binary SEM/UNet mask and a greyscale or overlay image.
 2. Use `1.stringart` to convert the mask into branch-like primitives.
 3. Use `2.preprocess` to remove obvious branch artifacts before reconnect.
-4. Use `3.reconnect` v7 to merge branch fragments into candidate bundles.
+4. Use staged `3.reconnect` to merge branch fragments into candidate bundles.
 5. Use `4.postprocess` to smooth and slightly thicken bundle labels.
 6. Export overlays, colored instance labels, and a DEM-oriented JSON bundle file.
 
@@ -17,8 +17,9 @@ This repository is being shaped into a CNT bundle extraction pipeline:
 Tools/
   crop_pair_interactive.py      Matplotlib paired cropper for aligned mask/overlay images.
   run_full_sem_pipeline.py      End-to-end runner for the current SEM bundle workflow.
-  visualize_ids.py             Interactive viewer for label IDs in reconnect/final outputs.
-  trace_component.py           Label-ID provenance tool for branch origins.
+  scale_helper.py               Physical-scale resolution + pixel-parameter auto-scaling.
+  visualize_ids.py              Interactive viewer for label IDs in reconnect/final outputs.
+  trace_component.py            Label-ID provenance tool for branch origins.
   mask_edit.py                  Legacy OpenCV mask editing utility.
 
 1.stringart/
@@ -33,8 +34,7 @@ Tools/
   reconnect_run.py              Main reconnect CLI.
   reconnect_debug.py            Inspection and rejection-log helper.
   reconnect_utils_straight.py   Standard straight-line evaluator.
-  reconnect_utils_curvy.py      Arc-aware evaluator for curved filaments (CNT default).
-  reconnect_config.yaml         Unified config; [curvy] section holds curvy-only keys.
+  reconnect_config.yaml         Staged reconnect config.
 
 4.postprocess/
   post_process_reconnect.py     Smooths/thickens reconnect labels and writes previews.
@@ -45,31 +45,67 @@ output/
 
 ## Reconnect Notes
 
-`reconnect_utils_curvy` extends the straight evaluator for CNT work. The important behavior is:
+The reconnect stage uses the straight evaluator with a staged config. The important behavior is:
 
-- Curvature-aware candidate rescue so curved fragments are not rejected only because they fail a straight-line residual gate.
 - Clear short-gap merge handling for visually obvious reconnections.
-- Same-direction absorb handling for tiny fragments that lie on top of a longer trunk.
-- A sharper turn cap for clear merges so obvious raster noise does not create severe kinked bundles.
+- Strict then relaxed tip reconnect passes for progressively broader candidate gaps.
+- Same-layer residual relaxation for fragments in the same orientation bin.
 - Relabeling lets longer surviving trunks claim overlaps first.
-- The straight evaluator can write candidate rejection/acceptance metrics to `debug.rejection_log_path`.
+- The evaluator can write candidate rejection/acceptance metrics to `debug.rejection_log_path`.
+- Shared tip tracing and bridge sampling settings live under `geometry`; true pass gates live under each stage.
 
-Curvy-only config keys live in the `[curvy]` section of `3.reconnect/reconnect_config.yaml`, including `clear_merge_max_turn_deg`, `same_dir_absorb_max_dist_px`, `same_dir_absorb_max_line_resid_px`, `same_dir_absorb_max_arc_miss_px`, and `same_dir_absorb_min_parallel`.
+### Staged Reconnect Pipeline
+
+The straight evaluator now runs **three ordered stages** (safest → broadest), each loaded from the config:
+
+| Stage key | Name | Role |
+|---|---|---|
+| `stage_clear` | `clear_merge` | Tiny, straight, high-confidence endpoint gaps only |
+| `stage_strict` | `strict_tip_reconnect` | Short-gap reconnect with full forward/opposition/residual/smoothness gates |
+| `stage_relaxed` | `relaxed_tip_reconnect` | Wider-gap reconnect with relaxed gates |
+
+Within `stage_strict` and `stage_relaxed`, a **same-layer relaxation** path applies when two components share the same orientation bin: `same_layer_max_line_resid_px`, `same_layer_min_forward_cos`, `same_layer_min_opposition` override the global residual gate to allow same-bin splits that would otherwise be blocked by a high residual score.
+
+### Overlap Handling
+
+Reconnect resolves heavy component overlaps with two strategies controlled by `thresholds.overlap_mode`:
+
+- `kill` (legacy): drop the entire smaller component when overlap exceeds `overlap_kill_thr`.
+- `trim` (recommended): erase only the pixels that overlap the larger component, then re-CC the remainder. Every sub-component with area ≥ `min_component_area` survives as its own fresh Component and can participate in downstream tip-bridging. Sub-components below the threshold are dropped.
+
+`morphology.trim_dilate_px > 0` adds a temporary halo to the larger component during the overlap test only. The halo is not persisted and is not subtracted from the smaller component, which avoids carving artificial gaps into adjacent filaments.
+
+### Layered Multi-Label Output
+
+After each reconnect run `reconnect_run.py` writes:
+
+```text
+<base>_reconnect_multilabel.npz   sparse per-ID pixel index arrays
+<base>_reconnect_multilabel.tif   one page per ID (BigTIFF)
+<base>_reconnect_multilabel_ids.json  page → ID mapping
+<base>_reconnect_overlap.png      pixels covered by ≥ 2 IDs
+```
 
 ## Stringart Acceptance
 
 `1.stringart/stringart_tiles.py` uses conservative Hough defaults plus a mask-support density gate:
 
-```text
-MIN_ACCEPT_NEWPIX      6
-MIN_ACCEPT_DENSITY     0.45
-HOUGH_THRESHOLD        18
-HOUGH_MIN_LINE_LENGTH  4
-HOUGH_MAX_LINE_GAP     5
-RESIDUAL_DILATE_KERNEL 2
-```
-
 The goal is to reject fake long chords over black background. A line can still bridge tiny raster gaps, but most of the proposed line must lie on the original mask. `--min-accept-density`, `--residual-dilate-kernel`, and `--residual-dilate-iters` are exposed as CLI overrides.
+
+### Multi-Grid Voting
+
+The pipeline runs stringart at multiple tile-grid origins and keeps only pixels that appear in at least `--tile-grid-vote-min` of them (default: 2 of 4 grids). This mitigates tile-boundary sensitivity at roughly 4× the per-run cost. Override with `--tile-grid-offsets` (JSON list of `[oy,ox]` pairs) and `--tile-grid-vote-min`.
+
+## Physical-Scale Auto-Scaling
+
+All pixel-distance defaults in `run_full_sem_pipeline.py` and `reconnect_config.yaml` are tuned for **SEM08** (1.66 µm HFW / 1536 px = 0.001081 µm/px). `Tools/scale_helper.py` handles cross-magnification adaptation:
+
+- `resolve_um_per_px()` tries (in order): `--um-per-px` CLI flag → filename FOV patterns (`_1p66_`, `20p7micron`, `3.45um`) → `DEFAULT_UM_PER_PX`.
+- `scale_pipeline_args()` applies `sf = um_per_px / ref_um_per_px` to every distance/area/curvature arg: linear parameters scale as `ref / sf`, area parameters as `ref / sf²`, curvature as `ref × sf`.
+- `write_scaled_reconnect_yaml()` writes a per-run scaled copy of `reconnect_config.yaml` without ever modifying the source.
+- Pass `--no-scale` to disable all scaling and use raw defaults regardless of µm/px.
+
+The runner always writes a per-run config copy (`reconnect_config_scaled.yaml` or `reconnect_config_active.yaml`) so the source YAML is never mutated even when only CLI overlap overrides are applied.
 
 ## End-To-End Runner
 
@@ -77,9 +113,28 @@ Use `Tools/run_full_sem_pipeline.py` from the repo root:
 
 ```powershell
 python Tools\run_full_sem_pipeline.py `
-  --mask 1.stringart\input\SEM05\crops\sem_full_00006_mask255_crop.png `
-  --background 1.stringart\input\SEM05\crops\sem_full_00006_overlay_crop.png
+  --mask input\sem_full_00000_1p66_crop512\mask.png `
+  --background input\sem_full_00000_1p66_crop512\sem.png
 ```
+
+Key CLI flags:
+
+| Flag | Default | Purpose |
+|---|---|---|
+| `--reconnect-version` | `straight` | Compatibility flag; straight evaluator only |
+| `--reco-overlap-mode` | `trim` | `trim` or `kill` overlap handling in reconnect |
+| `--reco-overlap-kill-thr` | `0.3` | Fraction threshold triggering kill/trim |
+| `--reco-trim-dilate-px` | `0` | Halo radius (px) for the trim test |
+| `--um-per-px` | auto | µm/px for scale-factor computation |
+| `--no-scale` | off | Disable pixel-parameter scaling |
+| `--tile-grid-offsets` | `[[0,0],[64,0],[0,64],[64,64]]` | Stringart multi-grid origins |
+| `--tile-grid-vote-min` | `2` | Min grids a pixel must appear in |
+| `--pre-fit-degree` | `2` | B-spline degree for preprocess skeleton smoothing (0=skip) |
+| `--pre-fit-smoothing` | `1.5` | Spline smoothing factor multiplier |
+| `--overlap-absorb-thr` | `0.6` | Post-thickening near-duplicate merge threshold |
+| `--occlusion-trim-thr` | `0.25` | Post-thickening render-layer occlusion trim |
+| `--occlusion-trim-min-px` | `50` | Minimum hidden rendered pixels before occlusion trim |
+| `--tip-trim-frac` | `0.10` | Erase tip-region overlap pixels in postprocess |
 
 The runner creates:
 
@@ -89,6 +144,7 @@ output\full_pipeline\<base>\2.preprocess\
 output\full_pipeline\<base>\3.reconnect\
 output\full_pipeline\<base>\4.postprocess\
 output\full_pipeline\<base>\final\
+output\full_pipeline\<base>\reconnect_config_scaled.yaml  (or _active.yaml)
 ```
 
 The `final` folder is the handoff folder. It contains the final overlay, final labels, colored instance preview, pipeline manifest, copied background image, and `<base>_bundles_dem.json`.
@@ -103,6 +159,7 @@ The `final` folder is the handoff folder. It contains the final overlay, final l
 - Removes small connected components.
 - Applies an oriented morphological close along that branch angle to close small raster gaps.
 - Optionally reduces multi-tip components to the dominant smoothed two-tip skeleton path.
+- Optionally fits a parametric B-spline to the dominant skeleton path (`--fit-degree`, `--fit-smoothing`) to force a physically meaningful curve before handing off to reconnect.
 - Writes cleaned branch PNGs, a merged branch mask, copied width metadata, and `pre_process_summary.json`.
 
 The intent is conservative cleanup: keep the stringart branch identities, remove obvious specks, and make fragmented line masks less brittle before reconnect scoring.
@@ -115,9 +172,13 @@ The intent is conservative cleanup: keep the stringart branch identities, remove
 - Splits disconnected components that accidentally share one label.
 - Drops very short pieces below `--min-keep-len`.
 - Absorbs short nearby pieces into longer neighboring bundles using an `--absorb-radius` halo.
+- Re-joins disconnected pieces that share the same source label within `--same-source-bridge-radius`.
 - Skeletonizes each kept bundle and extracts a dominant centerline.
 - Smooths that centerline with `--smooth-window`.
 - Redraws it as a slightly thicker label using `--thicken-px`.
+- **Overlap absorb** (`--overlap-absorb-thr`, default 0.6): after thickening, pairs whose intersection covers ≥ this fraction of the smaller mask are merged into the larger. Catches near-duplicate bundles that survive reconnect.
+- **Occlusion trim** (`--occlusion-trim-thr`, `--occlusion-trim-min-px`): trims lower-priority rendered layers whose pixels are mostly already covered by earlier layers.
+- **Tip trim** (`--tip-trim-frac`): erases overlap pixels near an ID's skeleton tip so it merges cleanly into the neighboring bundle without redundant coverage.
 - Writes post labels, color preview, overlay, and `post_process_summary.json`.
 
 The intent is to make each bundle look like one cleaner physical filament instance before final overlay and DEM JSON export.
@@ -139,13 +200,6 @@ python Tools\trace_component.py `
   --run output\full_pipeline\<base> `
   --step final `
   --ids 25 38 42
-```
-
-Recent runs:
-
-```text
-output\full_pipeline\sem_full_00008_mask255_crop\final
-output\full_pipeline\sem_full_00006_mask255_crop\final
 ```
 
 ## DEM JSON Contract
@@ -186,4 +240,4 @@ Coordinates are pixel coordinates. `rc` means `[row, col]`; `xy` means `[x=col, 
 
 ## Environment
 
-The current workflow has been run with `C:\Repos\venv_cnt\Scripts\python.exe` and depends on `numpy`, `scipy`, `scikit-image`, `opencv-python`, `matplotlib`, and `pyyaml`.
+The current workflow has been run with `C:\Repos\venv_cnt\Scripts\python.exe` and depends on `numpy`, `scipy`, `scikit-image`, `opencv-python`, `matplotlib`, `pyyaml`, and `tifffile`.

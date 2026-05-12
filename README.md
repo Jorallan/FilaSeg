@@ -23,11 +23,10 @@ Tools/
                                 Cleans stringart branch images before reconnect.
 
 3.reconnect/
-  reconnect_run.py              CLI entry point, supports --version straight/curvy.
+  reconnect_run.py              CLI entry point for staged reconnect.
   reconnect_debug.py            Inspection and rejection-log helper.
   reconnect_utils_straight.py   Standard straight-line evaluator.
-  reconnect_utils_curvy.py      Arc-aware evaluator for curved filaments (CNT default).
-  reconnect_config.yaml         Unified config; [curvy] section holds curvy-only keys.
+  reconnect_config.yaml         Staged reconnect config.
 
 4.postprocess/
   post_process_reconnect.py     Smooths/thickens reconnect labels and exports previews.
@@ -41,16 +40,16 @@ Run from the repo root:
 
 ```powershell
 python Tools\run_full_sem_pipeline.py `
-  --mask 1.stringart\input\SEM05\crops\sem_full_00006_mask255_crop.png `
-  --background 1.stringart\input\SEM05\crops\sem_full_00006_overlay_crop.png
+  --mask input\sem_full_00000_1p66_crop512\mask.png `
+  --background input\sem_full_00000_1p66_crop512\sem.png
 ```
 
 For the local CNT virtualenv used during development:
 
 ```powershell
 C:\Repos\venv_cnt\Scripts\python.exe Tools\run_full_sem_pipeline.py `
-  --mask 1.stringart\input\SEM05\crops\sem_full_00006_mask255_crop.png `
-  --background 1.stringart\input\SEM05\crops\sem_full_00006_overlay_crop.png
+  --mask input\sem_full_00000_1p66_crop512\mask.png `
+  --background input\sem_full_00000_1p66_crop512\sem.png
 ```
 
 The final outputs live in:
@@ -128,4 +127,4 @@ python 1.stringart\stringart_tiles.py `
 
 ## Environment Notes
 
-The active stage scripts need the scientific Python stack used in `venv_cnt`: `numpy`, `scipy`, `scikit-image`, `opencv-python`, `matplotlib`, and `pyyaml`.
+The active stage scripts need the scientific Python stack used in `venv_cnt`: `numpy`, `scipy`, `scikit-image`, `opencv-python`, `matplotlib`, `pyyaml`, and `tifffile`.
