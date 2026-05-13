@@ -170,10 +170,7 @@ The intent is conservative cleanup: keep the stringart branch identities, remove
 `4.postprocess/post_process_reconnect.py` prepares reconnect labels for the final handoff:
 
 - Reads the raw `*_reconnect_labels.tif` instance image.
-- Splits disconnected components that accidentally share one label.
 - Drops very short pieces below `--min-keep-len`.
-- Absorbs short nearby pieces into longer neighboring bundles using an `--absorb-radius` halo.
-- Re-joins disconnected pieces that share the same source label within `--same-source-bridge-radius`.
 - Skeletonizes each kept bundle and extracts a dominant centerline.
 - Smooths that centerline with `--smooth-window`.
 - Redraws it as a slightly thicker label using `--thicken-px`.

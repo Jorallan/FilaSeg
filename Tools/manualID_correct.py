@@ -40,7 +40,7 @@ for _key in [k for k in plt.rcParams if k.startswith("keymap.")]:
 
 LABEL_PATTERNS = ["*_manual_labels.tif", "*_post_labels.tif", "*_reconnect_labels.tif", "*_labels.tif", "*.tif"]
 BG_PATTERNS = ["*_original.*", "*_post_overlay.png", "*_reconnect_overlay.png", "*_overlay.png", "*_preview.png"]
-DEFAULT_INPUT = Path(r"C:\Repos\filaments_quantification\output\full_pipeline\sem_full_00000_1p66_crop512_20260512_154740\final")
+DEFAULT_INPUT = Path(r"C:\Repos\filaments_quantification\output\full_pipeline\sem_full_00000_1p66_crop512_v2autotune\final")
 PROMPT_FOR_INPUT = False
 SCRIPT_INPUT = DEFAULT_INPUT
 

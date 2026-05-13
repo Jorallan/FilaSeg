@@ -9,7 +9,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-from scipy.ndimage import binary_dilation, convolve, distance_transform_edt
+from scipy.ndimage import convolve, distance_transform_edt
 from skimage import io as skio
 from skimage.measure import label as cc_label
 from skimage.morphology import skeletonize
@@ -26,9 +26,6 @@ DEFAULT_OUTPUT     = ROOT / "output" / "full_pipeline" / "sem_full_00000_1p66_ma
 DEFAULT_THICKEN_PX              = 3    # px to thicken each final bundle centerline
 DEFAULT_SMOOTH_WINDOW           = 7    # moving-window size for centerline smoothing
 DEFAULT_MIN_KEEP_LEN            = 10   # drop bundles whose skeleton is shorter than this (px)
-DEFAULT_ABSORB_LEN              = 28   # absorb bundles shorter than this into a longer neighbour
-DEFAULT_ABSORB_RADIUS           = 5    # halo radius (px) for neighbour detection during absorb
-DEFAULT_SAME_SOURCE_BRIDGE_RADIUS = 12 # merge disconnected pieces sharing the same source label within this radius
 DEFAULT_OVERLAY_ALPHA           = 0.72 # blend weight for the coloured overlay (0 = background only, 1 = labels only)
 # ── Overlap absorb / endpoint trim (after thickening) ─────────────────────
 DEFAULT_OVERLAP_ABSORB_THR      = 0.0   # 0 = disabled. >=0.5 absorbs near-duplicate IDs into the larger.
@@ -49,8 +46,6 @@ class Piece:
     mask: np.ndarray
     skel_len: int
     area: int
-    absorbed_into: int | None = None
-    same_source_into: int | None = None
     dropped: bool = False
 
 
@@ -62,9 +57,6 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--thicken-px", type=int, default=DEFAULT_THICKEN_PX)
     ap.add_argument("--smooth-window", type=int, default=DEFAULT_SMOOTH_WINDOW)
     ap.add_argument("--min-keep-len", type=int, default=DEFAULT_MIN_KEEP_LEN)
-    ap.add_argument("--absorb-len", type=int, default=DEFAULT_ABSORB_LEN)
-    ap.add_argument("--absorb-radius", type=int, default=DEFAULT_ABSORB_RADIUS)
-    ap.add_argument("--same-source-bridge-radius", type=int, default=DEFAULT_SAME_SOURCE_BRIDGE_RADIUS)
     ap.add_argument("--overlay-alpha", type=float, default=DEFAULT_OVERLAY_ALPHA)
     ap.add_argument("--overlap-absorb-thr", type=float, default=DEFAULT_OVERLAP_ABSORB_THR,
                     help="Pairs whose intersection covers >= this fraction of the smaller mask are merged "
@@ -245,113 +237,32 @@ def render_path(label_img: np.ndarray, path: np.ndarray, label_id: int, thicknes
 
 
 
-def split_pieces(lbl: np.ndarray) -> list[Piece]:
+def pieces_from_labels(lbl: np.ndarray) -> list[Piece]:
     pieces: list[Piece] = []
     nid = 1
     for src_id in [int(v) for v in np.unique(lbl) if v]:
-        cc = cc_label(lbl == src_id, connectivity=2)
-        for k in range(1, int(cc.max()) + 1):
-            m = cc == k
-            if not np.any(m):
-                continue
-            pieces.append(Piece(src_id, nid, m, int(np.count_nonzero(skeletonize(m))), int(m.sum())))
-            nid += 1
+        m = lbl == src_id
+        if not np.any(m):
+            continue
+        pieces.append(Piece(src_id, nid, m, int(np.count_nonzero(skeletonize(m))), int(m.sum())))
+        nid += 1
     return pieces
 
 
-def split_pieces_from_layers(layers: list[tuple[int, np.ndarray]]) -> list[Piece]:
+def pieces_from_layers(layers: list[tuple[int, np.ndarray]]) -> list[Piece]:
     pieces: list[Piece] = []
     nid = 1
     for src_id, layer_mask in layers:
-        cc = cc_label(layer_mask, connectivity=2)
-        for k in range(1, int(cc.max()) + 1):
-            m = cc == k
-            if not np.any(m):
-                continue
-            pieces.append(Piece(src_id, nid, m, int(np.count_nonzero(skeletonize(m))), int(m.sum())))
-            nid += 1
+        if not np.any(layer_mask):
+            continue
+        pieces.append(Piece(src_id, nid, layer_mask, int(np.count_nonzero(skeletonize(layer_mask))), int(layer_mask.sum())))
+        nid += 1
     return pieces
 
 
-def bridge_points(mask: np.ndarray) -> np.ndarray:
-    sk = skeletonize(mask)
-    eps = endpoints(sk)
-    pts = np.asarray(eps, dtype=np.int32) if eps else np.argwhere(sk > 0).astype(np.int32)
-    if len(pts) == 0:
-        pts = np.argwhere(mask).astype(np.int32)
-    return pts
-
-
-def closest_points(a: np.ndarray, b: np.ndarray) -> tuple[float, np.ndarray, np.ndarray]:
-    pa, pb = bridge_points(a), bridge_points(b)
-    if len(pa) == 0 or len(pb) == 0:
-        return float("inf"), np.zeros(2, dtype=np.int32), np.zeros(2, dtype=np.int32)
-    d2 = np.sum((pa[:, None, :] - pb[None, :, :]) ** 2, axis=2)
-    ia, ib = np.unravel_index(int(np.argmin(d2)), d2.shape)
-    return float(np.sqrt(d2[ia, ib])), pa[ia], pb[ib]
-
-
-def line_bridge(shape: tuple[int, int], a: np.ndarray, b: np.ndarray) -> np.ndarray:
-    out = np.zeros(shape, dtype=np.uint8)
-    cv2.line(out, (int(a[1]), int(a[0])), (int(b[1]), int(b[0])), 1, 1, cv2.LINE_8)
-    return out > 0
-
-
-def refresh_piece(piece: Piece) -> None:
-    piece.area = int(piece.mask.sum())
-    piece.skel_len = int(np.count_nonzero(skeletonize(piece.mask)))
-
-
-def bridge_same_source_pieces(pieces: list[Piece], radius: int) -> int:
-    if radius <= 0:
-        return 0
-    merged = 0
-    for src_id in sorted({p.src_id for p in pieces}):
-        while True:
-            active = [p for p in pieces if p.src_id == src_id and not p.dropped]
-            if len(active) < 2:
-                break
-            best = None
-            for i, p in enumerate(active):
-                for q in active[i + 1:]:
-                    dist, a, b = closest_points(p.mask, q.mask)
-                    if dist <= radius and (best is None or dist < best[0]):
-                        best = (dist, p, q, a, b)
-            if best is None:
-                break
-            _, p, q, a, b = best
-            keep, drop = sorted((p, q), key=lambda x: (-x.skel_len, -x.area, x.new_id))
-            keep.mask = np.logical_or.reduce((keep.mask, drop.mask, line_bridge(keep.mask.shape, a, b)))
-            refresh_piece(keep)
-            drop.same_source_into = keep.new_id
-            drop.dropped = True
-            merged += 1
-    return merged
-
-
-def absorb_small_pieces(pieces: list[Piece], radius: int, absorb_len: int, min_keep_len: int) -> None:
+def drop_short_pieces(pieces: list[Piece], min_keep_len: int) -> None:
     for p in pieces:
         if p.skel_len < min_keep_len:
-            p.dropped = True
-    active = [p for p in pieces if not p.dropped]
-    for p in sorted(active, key=lambda x: x.skel_len):
-        if p.skel_len >= absorb_len:
-            continue
-        halo = binary_dilation(p.mask, iterations=max(1, radius))
-        best, best_touch = None, 0
-        for q in active:
-            if q is p or q.dropped or q.skel_len <= p.skel_len:
-                continue
-            touch = int(np.count_nonzero(np.logical_and(halo, q.mask)))
-            if touch > best_touch:
-                best, best_touch = q, touch
-        if best is not None and best_touch > 0:
-            best.mask = np.logical_or(best.mask, p.mask)
-            best.area = int(best.mask.sum())
-            best.skel_len = int(np.count_nonzero(skeletonize(best.mask)))
-            p.absorbed_into = best.new_id
-            p.dropped = True
-        elif p.skel_len < min_keep_len:
             p.dropped = True
 
 
@@ -571,11 +482,10 @@ def main() -> None:
     base = src_label.stem.replace("_reconnect_labels", "")
     layered_src = args.input / f"{base}_reconnect_multilabel.npz"
     if layered_src.exists():
-        pieces = split_pieces_from_layers(load_layered_components(layered_src, lbl.shape))
+        pieces = pieces_from_layers(load_layered_components(layered_src, lbl.shape))
     else:
-        pieces = split_pieces(lbl)
-    same_source_merged = bridge_same_source_pieces(pieces, args.same_source_bridge_radius)
-    absorb_small_pieces(pieces, args.absorb_radius, args.absorb_len, args.min_keep_len)
+        pieces = pieces_from_labels(lbl)
+    drop_short_pieces(pieces, args.min_keep_len)
 
     out = np.zeros(lbl.shape, dtype=np.uint16)
     layered_out: list[tuple[int, np.ndarray]] = []
@@ -634,16 +544,12 @@ def main() -> None:
         "source": str(src_label),
         "source_multilabel": str(layered_src) if layered_src.exists() else None,
         "raw_labels": int(len([v for v in np.unique(lbl) if v])),
-        "pieces_after_split": len(pieces),
-        "same_source_merged_pieces": int(same_source_merged),
+        "input_pieces": len(pieces),
         "kept_labels": int(len([v for v in np.unique(out) if v])),
         "max_label_id": int(out.max()),
-        "absorbed_pieces": int(sum(p.absorbed_into is not None for p in pieces)),
-        "same_source_absorbed_pieces": int(sum(p.same_source_into is not None for p in pieces)),
-        "dropped_pieces": int(sum(p.dropped and p.absorbed_into is None and p.same_source_into is None for p in pieces)),
+        "dropped_pieces": int(sum(p.dropped for p in pieces)),
         "thicken_px": int(args.thicken_px),
         "smooth_window": int(args.smooth_window),
-        "same_source_bridge_radius": int(args.same_source_bridge_radius),
         "overlap_absorb_thr": float(args.overlap_absorb_thr),
         "overlap_absorbed_pairs": [
             {"absorbed_id": int(a), "into_id": int(b), "overlap_ratio": round(float(r), 4)}

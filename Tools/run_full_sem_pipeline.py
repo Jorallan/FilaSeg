@@ -54,6 +54,17 @@ DEFAULT_UM_PER_PX  = _REF_UM_PER_PX          # change per dataset, or pass --um-
 DEFAULT_TILE_GRID_OFFSETS  = "[[0,0],[64,0],[0,64],[64,64]]"
 DEFAULT_TILE_GRID_VOTE_MIN = 2
 
+# ── Preprocess (stage 2) ──────────────────────────────────────────────────
+DEFAULT_PRE_BIN_THRESHOLD    = 127  # grayscale threshold for binarising branch masks
+DEFAULT_PRE_LINE_CLOSE_LEN   = 4    # oriented closing kernel length (px)
+DEFAULT_PRE_LINE_CLOSE_ITERS = 2    # closing iterations
+DEFAULT_PRE_MIN_COMPONENT    = 10    # drop connected components smaller than this (px)
+DEFAULT_PRE_CLEAN_TO_PATH    = True # reduce multi-tip components to dominant 2-tip path
+DEFAULT_PRE_CLEAN_SMOOTH_WIN = 4    # smoothing window for the dominant path
+DEFAULT_PRE_TARGET_WIDTH_PX  = 0    # 0 = use per-branch median width; >0 = uniform width across all components
+DEFAULT_PRE_FIT_DEGREE       = 2    # 0=skip spline fit; 1/2/3=parametric B-spline degree (forces physically meaningful curve)
+DEFAULT_PRE_FIT_SMOOTHING    = 1.5  # spline smoothing factor multiplier (higher = stiffer fit)
+
 # ── Reconnect (stage 3) ───────────────────────────────────────────────────
 DEFAULT_RECONNECT_VERSION   = "straight"
 # Reconnect overlap handling (modifies the generated YAML `overlap` block):
@@ -66,24 +77,11 @@ DEFAULT_RECO_OVERLAP_MODE     = "trim"
 DEFAULT_RECO_OVERLAP_KILL_THR = 0.3
 DEFAULT_RECO_TRIM_DILATE_PX   = 0
 
-# ── Preprocess (stage 2) ──────────────────────────────────────────────────
-DEFAULT_PRE_BIN_THRESHOLD    = 127  # grayscale threshold for binarising branch masks
-DEFAULT_PRE_LINE_CLOSE_LEN   = 4    # oriented closing kernel length (px)
-DEFAULT_PRE_LINE_CLOSE_ITERS = 2    # closing iterations
-DEFAULT_PRE_MIN_COMPONENT    = 10    # drop connected components smaller than this (px)
-DEFAULT_PRE_CLEAN_TO_PATH    = True # reduce multi-tip components to dominant 2-tip path
-DEFAULT_PRE_CLEAN_SMOOTH_WIN = 4    # smoothing window for the dominant path
-DEFAULT_PRE_TARGET_WIDTH_PX  = 0    # 0 = use per-branch median width; >0 = uniform width across all components
-DEFAULT_PRE_FIT_DEGREE       = 2    # 0=skip spline fit; 1/2/3=parametric B-spline degree (forces physically meaningful curve)
-DEFAULT_PRE_FIT_SMOOTHING    = 1.5  # spline smoothing factor multiplier (higher = stiffer fit)
 
 # ── Postprocess (stage 4) ─────────────────────────────────────────────────
 DEFAULT_THICKEN_PX         = 8    # px to thicken each final bundle centerline
 DEFAULT_SMOOTH_WINDOW      = 8    # moving-window size for centerline smoothing
 DEFAULT_MIN_KEEP_LEN       = 20   # drop bundles whose skeleton is shorter than this (px)
-DEFAULT_ABSORB_LEN         = 30   # absorb bundles shorter than this into a longer neighbour
-DEFAULT_ABSORB_RADIUS      = 6    # halo radius (px) for neighbour detection during absorb
-DEFAULT_BRIDGE_RADIUS      = 12   # re-join same-source split pieces within this radius
 DEFAULT_OVERLAY_ALPHA      = 0.72 # overlay blend (0 = background only, 1 = labels only)
 DEFAULT_OVERLAP_ABSORB_THR = 0.6  # postprocess overlap: absorb near-duplicate IDs into the larger
 DEFAULT_OCCLUSION_TRIM_THR = 0.25 # postprocess overlap: trim lower-priority layers hidden by earlier layers
@@ -140,9 +138,6 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--thicken-px",      type=int,   default=DEFAULT_THICKEN_PX)
     ap.add_argument("--smooth-window",   type=int,   default=DEFAULT_SMOOTH_WINDOW)
     ap.add_argument("--min-keep-len",    type=int,   default=DEFAULT_MIN_KEEP_LEN)
-    ap.add_argument("--absorb-len",      type=int,   default=DEFAULT_ABSORB_LEN)
-    ap.add_argument("--absorb-radius",   type=int,   default=DEFAULT_ABSORB_RADIUS)
-    ap.add_argument("--bridge-radius",   type=int,   default=DEFAULT_BRIDGE_RADIUS)
     ap.add_argument("--overlay-alpha",   type=float, default=DEFAULT_OVERLAY_ALPHA)
     ap.add_argument("--overlap-absorb-thr", type=float, default=DEFAULT_OVERLAP_ABSORB_THR,
                     help="Postprocess: absorb near-duplicate IDs whose intersection covers >= this "
@@ -407,9 +402,6 @@ def main() -> None:
         "--thicken-px",                 str(args.thicken_px),
         "--smooth-window",              str(args.smooth_window),
         "--min-keep-len",               str(args.min_keep_len),
-        "--absorb-len",                 str(args.absorb_len),
-        "--absorb-radius",              str(args.absorb_radius),
-        "--same-source-bridge-radius",  str(args.bridge_radius),
         "--overlay-alpha",              str(args.overlay_alpha),
         "--overlap-absorb-thr",         str(args.overlap_absorb_thr),
         "--occlusion-trim-thr",         str(args.occlusion_trim_thr),
