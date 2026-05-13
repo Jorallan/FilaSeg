@@ -47,11 +47,11 @@ _USE_SCALING       = True                    # master on/off switch
 DEFAULT_UM_PER_PX  = _REF_UM_PER_PX          # change per dataset, or pass --um-per-px
 
 # ── Stringart (stage 1) ───────────────────────────────────────────────────
-# Tile-grid voting: process the image at multiple tile-grid origins and keep
-# pixels that appear in >= TILE_GRID_VOTE_MIN of them. Mitigates tile-boundary
-# sensitivity. Default 4-grid majority voting (~4× stringart cost but cleaner).
-# Pass a JSON string at CLI to override, e.g. "[[0,0]]" for single-grid.
-DEFAULT_TILE_GRID_OFFSETS  = "[[0,0],[64,0],[0,64],[64,64]]"
+# Tile-grid voting: None/1 = single grid; integer N = generated offsets in
+# stringart_tiles.py; JSON list = explicit [oy,ox] origins.
+DEFAULT_TILE_SIZE       = 128
+DEFAULT_ANGLE_STEP_DEG  = 15
+DEFAULT_TILE_GRID_OFFSETS  = 4
 DEFAULT_TILE_GRID_VOTE_MIN = 2
 
 # ── Preprocess (stage 2) ──────────────────────────────────────────────────
@@ -159,9 +159,11 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--no-scale", action="store_true",
                     help="Disable pixel-parameter scaling; use raw defaults regardless of µm/px.")
     # stringart multi-grid voting (passed through to stage 1)
+    ap.add_argument("--tile-size", type=int, default=DEFAULT_TILE_SIZE)
+    ap.add_argument("--angle-step-deg", type=int, default=DEFAULT_ANGLE_STEP_DEG)
     ap.add_argument("--tile-grid-offsets", type=str, default=DEFAULT_TILE_GRID_OFFSETS,
-                    help='JSON list of [oy,ox] tile-grid origins for stringart multi-grid voting, '
-                         'e.g. "[[0,0],[64,64]]". Mitigates tile-boundary sensitivity. ~Nx cost.')
+                    help='Tile-grid offset count (1,2,3,4,...) or JSON list of [oy,ox] origins, '
+                         'e.g. "4" or "[[0,0],[64,0],[0,64],[64,64]]". Omit for single-grid.')
     ap.add_argument("--tile-grid-vote-min", type=int, default=DEFAULT_TILE_GRID_VOTE_MIN,
                     help="Min grids a pixel must appear in to be kept (1=OR, 2+=majority).")
     return ap.parse_args()
@@ -359,6 +361,8 @@ def main() -> None:
     _overlap["mode"] = args.reco_overlap_mode
     _overlap["kill_thr"] = float(args.reco_overlap_kill_thr)
     _overlap["trim_dilate_px"] = int(args.reco_trim_dilate_px)
+    _cm = _cfg.setdefault("stage_clear", {}).setdefault("thresholds", {})
+    _cm["clear_merge_backward_max_layer_gap"] = max(1, int(round(4 * DEFAULT_ANGLE_STEP_DEG / max(1, args.angle_step_deg))))
     reconnect_cfg.write_text(_yaml.dump(_cfg, default_flow_style=False, sort_keys=False), encoding="utf-8")
 
     run([
@@ -366,7 +370,9 @@ def main() -> None:
         "--input", args.mask,
         "--output-root", run_dir,
         "--output-folder-name", STAGE_STRINGART,
-        "--tile-grid-offsets", args.tile_grid_offsets,
+        "--tile-size", str(args.tile_size),
+        "--angle-step-deg", str(args.angle_step_deg),
+        *(["--tile-grid-offsets", args.tile_grid_offsets] if args.tile_grid_offsets else []),
         "--tile-grid-vote-min", str(args.tile_grid_vote_min),
     ])
     run([

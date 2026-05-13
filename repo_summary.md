@@ -24,7 +24,6 @@ Tools/
 
 1.stringart/
   stringart_tiles.py            Primary line-based vectorizer.
-  stringart_tiles_curve.py      Curve primitive experiment.
 
 2.preprocess/
   preprocess_stringart_branches.py
@@ -95,7 +94,7 @@ The goal is to reject fake long chords over black background. A line can still b
 
 ### Multi-Grid Voting
 
-The pipeline runs stringart at multiple tile-grid origins and keeps only pixels that appear in at least `--tile-grid-vote-min` of them (default: 2 of 4 grids). This mitigates tile-boundary sensitivity at roughly 4× the per-run cost. Override with `--tile-grid-offsets` (JSON list of `[oy,ox]` pairs) and `--tile-grid-vote-min`.
+The pipeline can run stringart at multiple tile-grid origins and keep only pixels that appear in at least `--tile-grid-vote-min` of them. By default `--tile-grid-offsets` is omitted, which means a single grid. Pass an integer count (`1`, `2`, `3`, `4`, etc.) to generate offsets from the tile size; `4` restores the previous half-tile four-grid pattern. You can still pass an explicit JSON list of `[oy,ox]` pairs.
 
 ## Physical-Scale Auto-Scaling
 
@@ -128,7 +127,7 @@ Key CLI flags:
 | `--reco-trim-dilate-px` | `0` | Halo radius (px) for the trim test |
 | `--um-per-px` | auto | µm/px for scale-factor computation |
 | `--no-scale` | off | Disable pixel-parameter scaling |
-| `--tile-grid-offsets` | `[[0,0],[64,0],[0,64],[64,64]]` | Stringart multi-grid origins |
+| `--tile-grid-offsets` | omitted / `1` | Stringart tile-grid origin count or explicit origins |
 | `--tile-grid-vote-min` | `2` | Min grids a pixel must appear in |
 | `--pre-fit-degree` | `2` | B-spline degree for preprocess skeleton smoothing (0=skip) |
 | `--pre-fit-smoothing` | `1.5` | Spline smoothing factor multiplier |

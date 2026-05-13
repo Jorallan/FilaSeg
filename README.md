@@ -16,7 +16,6 @@ Tools/
 
 1.stringart/
   stringart_tiles.py            Tile-wise greedy vectorizer.
-  stringart_tiles_curve.py      Curve-oriented variant.
 
 2.preprocess/
   preprocess_stringart_branches.py
@@ -112,6 +111,8 @@ Reconnect rejection logging can be enabled through the `debug.rejection_log_path
 ## Stringart Acceptance
 
 The default stringart config is conservative again. A candidate line must now satisfy both gates: enough new residual pixels and enough support density on the original mask. The density gate rejects long fake chords that touch a few CNT pixels but mostly cross black background.
+
+Tile-grid voting can be enabled with `--tile-grid-offsets`: omit it or pass `1` for a single grid, pass `4` for the previous half-tile four-grid pattern, or pass an explicit JSON list of `[oy,ox]` origins.
 
 ```powershell
 python 1.stringart\stringart_tiles.py `

@@ -41,15 +41,14 @@ CONFIG: Dict[str, Any] = {
     # --- Tiling / binning ---
     "TILE_SIZE":       128,   # tile width/height in px; smaller = more local fits, more seams
     "ANGLE_STEP_DEG":  15,    # angle-bin width over [0°,180°); smaller = more bins
-    # Multi-grid voting: list of [oy, ox] tile-grid origins (in px). The image is
+    # Multi-grid voting: None/1 = single grid; integer N = generated offsets;
+    # or set an explicit list of [oy, ox] tile-grid origins (in px). The image is
     # processed once per offset; per-orientation branches are aggregated via
     # majority voting (a pixel is kept if it appears in >= TILE_GRID_VOTE_MIN of
     # the grids). This makes the result almost insensitive to where the tile grid
-    # lies and rejects single-grid noise. Default [[0,0]] is single-grid (same as
-    # before). Try [[0,0],[64,64]] for 2-grid (vote_min=1) or
-    # [[0,0],[64,0],[0,64],[64,64]] for 4-grid (vote_min=2 recommended). Cost is
-    # ~Nx the stringart stage where N = len(offsets).
-    "TILE_GRID_OFFSETS":  [[0, 0], [64, 0], [0, 64], [64, 64]],   # 4-grid voting
+    # lies and rejects single-grid noise. Cost is ~Nx the stringart stage where
+    # N = len(offsets). For TILE_SIZE=128, 4 -> [[0,0],[64,0],[0,64],[64,64]].
+    "TILE_GRID_OFFSETS":  None,
     "TILE_GRID_VOTE_MIN": 2,    # majority: pixel kept if in >= this many grids (rejects single-grid noise)
 
     # --- Preprocessing ---
@@ -160,9 +159,8 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--auto-scale", action="store_true", default=None)
     ap.add_argument("--no-auto-scale", action="store_false", dest="auto_scale")
     ap.add_argument("--tile-grid-offsets", type=str, default=None,
-                    help='JSON list of [oy,ox] tile-grid origins for multi-grid voting, '
-                         'e.g. "[[0,0],[64,64]]" or "[[0,0],[64,0],[0,64],[64,64]]". '
-                         'Default single-grid: [[0,0]].')
+                    help='Tile-grid offset count (1,2,3,4,...) or JSON list of [oy,ox] origins, '
+                         'e.g. "4" or "[[0,0],[64,0],[0,64],[64,64]]". Omit for single-grid.')
     ap.add_argument("--tile-grid-vote-min", type=int, default=None,
                     help="Min number of grids a pixel must appear in to be kept. "
                          "1 = OR (any grid). 2+ = strict (rejects single-grid noise).")
@@ -193,10 +191,39 @@ def apply_cli_overrides(args: argparse.Namespace) -> None:
         if val is not None:
             CONFIG[cfg_name] = val
     if getattr(args, "tile_grid_offsets", None):
-        import json as _json
-        CONFIG["TILE_GRID_OFFSETS"] = _json.loads(args.tile_grid_offsets)
+        CONFIG["TILE_GRID_OFFSETS"] = parse_tile_grid_offsets(args.tile_grid_offsets)
     if getattr(args, "tile_grid_vote_min", None) is not None:
         CONFIG["TILE_GRID_VOTE_MIN"] = int(args.tile_grid_vote_min)
+
+
+def apply_tile_size_scaling() -> None:
+    s2 = (max(1, int(CONFIG["TILE_SIZE"])) / 128.0) ** 2
+    for k in ("MAX_LINES_PER_TILE", "MAX_CANDIDATES_TO_TRY"):
+        CONFIG[k] = max(1, int(round(CONFIG[k] * s2)))
+
+
+def parse_tile_grid_offsets(value: Any) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        s = value.strip()
+        return None if s.lower() in ("", "none", "null") else json.loads(s)
+    return value
+
+
+def resolve_tile_grid_offsets(spec: Any, tile_size: int) -> List[List[int]]:
+    spec = parse_tile_grid_offsets(spec)
+    if spec is None:
+        return [[0, 0]]
+    if isinstance(spec, (int, float)) and not isinstance(spec, bool):
+        n, half = max(1, int(spec)), max(1, int(tile_size) // 2)
+        if n <= 1: return [[0, 0]]
+        if n == 2: return [[0, 0], [half, half]]
+        if n == 3: return [[0, 0], [half, 0], [0, half]]
+        if n == 4: return [[0, 0], [half, 0], [0, half], [half, half]]
+        return [[int(((i * 0.61803398875) % 1.0) * tile_size),
+                 int(((i * 0.41421356237) % 1.0) * tile_size)] for i in range(n)]
+    return spec
 
 
 # ============================================================
@@ -568,9 +595,9 @@ def process_image_multigrid(
     so features near a boundary in one grid land in the interior of another.
     Returns the same 5-tuple as process_image_tiled; tile_stats are concatenated.
     """
-    offsets = CONFIG.get("TILE_GRID_OFFSETS") or [[0, 0]]
     # Sanity: clamp offsets to [0, TILE_SIZE) and de-dup
     tsz = int(CONFIG["TILE_SIZE"])
+    offsets = resolve_tile_grid_offsets(CONFIG.get("TILE_GRID_OFFSETS"), tsz)
     seen = set()
     norm: List[Tuple[int, int]] = []
     for oy, ox in offsets:
@@ -856,6 +883,7 @@ def run_experiment_set(
 
 def main() -> None:
     apply_cli_overrides(parse_args())
+    apply_tile_size_scaling()
     img          = read_gray(CONFIG["INPUT_PATH"])
     img_bin_orig = bool255(binarize(img, CONFIG["BIN_THRESHOLD"]))
     img_bin      = img_bin_orig.copy()
