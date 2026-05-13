@@ -51,7 +51,7 @@ DEFAULT_UM_PER_PX  = _REF_UM_PER_PX          # change per dataset, or pass --um-
 # stringart_tiles.py; JSON list = explicit [oy,ox] origins.
 DEFAULT_TILE_SIZE       = 128
 DEFAULT_ANGLE_STEP_DEG  = 15
-DEFAULT_TILE_GRID_OFFSETS  = 4
+DEFAULT_TILE_GRID_OFFSETS  = 8
 DEFAULT_TILE_GRID_VOTE_MIN = 2
 
 # ── Preprocess (stage 2) ──────────────────────────────────────────────────
@@ -86,7 +86,6 @@ DEFAULT_OVERLAY_ALPHA      = 0.72 # overlay blend (0 = background only, 1 = labe
 DEFAULT_OVERLAP_ABSORB_THR = 0.6  # postprocess overlap: absorb near-duplicate IDs into the larger
 DEFAULT_OCCLUSION_TRIM_THR = 0.25 # postprocess overlap: trim lower-priority layers hidden by earlier layers
 DEFAULT_OCCLUSION_TRIM_MIN_PX = 50 # hidden rendered pixels required before occlusion trim triggers
-DEFAULT_TIP_TRIM_FRAC      = 0.10  # postprocess overlap: trim pixels near an ID's skeleton tip
 
 # ── DEM JSON ──────────────────────────────────────────────────────────────
 DEFAULT_POLYLINE_STEP = 1   # keep every Nth centerline point in DEM JSON (1 = all)
@@ -147,9 +146,6 @@ def parse_args() -> argparse.Namespace:
                          "already covered. 0 disables.")
     ap.add_argument("--occlusion-trim-min-px", type=int, default=DEFAULT_OCCLUSION_TRIM_MIN_PX,
                     help="Postprocess: minimum hidden rendered pixels before occlusion trimming triggers.")
-    ap.add_argument("--tip-trim-frac", type=float, default=DEFAULT_TIP_TRIM_FRAC,
-                    help="Postprocess: erase overlap pixels at an ID's skeleton tip when overlap is "
-                         "tip-dominant. 0 disables. Try 0.15.")
     # DEM JSON
     ap.add_argument("--polyline-step",   type=int,   default=DEFAULT_POLYLINE_STEP)
     # physical-scale auto-scaling
@@ -412,7 +408,6 @@ def main() -> None:
         "--overlap-absorb-thr",         str(args.overlap_absorb_thr),
         "--occlusion-trim-thr",         str(args.occlusion_trim_thr),
         "--occlusion-trim-min-px",      str(args.occlusion_trim_min_px),
-        "--tip-trim-frac",              str(args.tip_trim_frac),
     ])
 
     post_labels = find_one(post_out, "*_post_labels.tif")

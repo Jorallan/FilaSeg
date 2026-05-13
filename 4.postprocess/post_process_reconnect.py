@@ -31,7 +31,6 @@ DEFAULT_OVERLAY_ALPHA           = 0.72 # blend weight for the coloured overlay (
 DEFAULT_OVERLAP_ABSORB_THR      = 0.0   # 0 = disabled. >=0.5 absorbs near-duplicate IDs into the larger.
 DEFAULT_OCCLUSION_TRIM_THR      = 0.0   # 0 = disabled. Trim lower-priority layers mostly hidden by earlier ones.
 DEFAULT_OCCLUSION_TRIM_MIN_PX   = 500   # minimum hidden pixels before occlusion trim can trigger
-DEFAULT_TIP_TRIM_FRAC           = 0.0   # 0 = disabled. ~0.15 trims overlap pixels at an ID's skeleton tip.
 OCCLUSION_FRAGMENT_MIN_PX       = 16    # keep tiny occlusion fragments only when the whole ID is tiny
 OCCLUSION_FRAGMENT_MIN_FRAC     = 0.06  # visible fragments below this fraction of the original layer are debris
 OCCLUSION_FRAGMENT_ADOPT_MIN_HIDDEN_FRAC = 0.5 # only hand off fragments from mostly occluded layers
@@ -66,10 +65,6 @@ def parse_args() -> argparse.Namespace:
                          "earlier layers. 0 disables.")
     ap.add_argument("--occlusion-trim-min-px", type=int, default=DEFAULT_OCCLUSION_TRIM_MIN_PX,
                     help="Minimum covered pixels required before --occlusion-trim-thr can trigger.")
-    ap.add_argument("--tip-trim-frac", type=float, default=DEFAULT_TIP_TRIM_FRAC,
-                    help="If overlap pixels of A∩B sit within this fraction of A's skeleton-tip distance, "
-                         "erase them from A so it 'merges into' B without redundant overlap. 0 disables. "
-                         "Try 0.15.")
     ap.add_argument("--no-copy-source", action="store_true")
     return ap.parse_args()
 
@@ -331,7 +326,6 @@ def trim_occluded_layers(
     if thr <= 0 or len(layers) < 2:
         return layers, [], 0
     out: list[tuple[int, np.ndarray]] = []
-    covered = np.zeros(layers[0][1].shape, dtype=bool)
     log: list[tuple[int, int, float]] = []  # (id, hidden_px, hidden_ratio)
     fragment_removed = 0
     split_trimmed_ids: set[int] = set()
@@ -339,11 +333,16 @@ def trim_occluded_layers(
         area = int(mask.sum())
         if area <= 0:
             continue
-        hidden = np.logical_and(mask, covered)
+        hidden = np.zeros_like(mask, dtype=bool)
+        for _, prev_mask in out:
+            inter = np.logical_and(mask, prev_mask)
+            inter_px = int(inter.sum())
+            if inter_px >= int(min_px) and inter_px / max(1, area) >= float(thr):
+                hidden |= inter
         hidden_px = int(hidden.sum())
         hidden_ratio = hidden_px / max(1, area)
-        if hidden_px >= int(min_px) and hidden_ratio >= float(thr):
-            mask = np.logical_and(mask, ~covered)
+        if hidden_px > 0:
+            mask = np.logical_and(mask, ~hidden)
             if not np.any(mask):
                 log.append((int(cid), hidden_px, hidden_ratio))
                 continue
@@ -363,7 +362,6 @@ def trim_occluded_layers(
                         split_trimmed_ids.add(int(cid))
             log.append((int(cid), hidden_px, hidden_ratio))
         out.append((int(cid), mask))
-        covered |= mask
 
     if split_trimmed_ids and len(out) > 1:
         work = [(cid, mask.copy()) for cid, mask in out]
@@ -392,70 +390,6 @@ def trim_occluded_layers(
             work[i] = (cid, keep_mask)
         out = [(cid, mask) for cid, mask in work if np.any(mask)]
     return out, log, fragment_removed
-
-
-def trim_endpoint_overlaps(
-    layers: list[tuple[int, np.ndarray]], tip_frac: float
-) -> tuple[list[tuple[int, np.ndarray]], int]:
-    """For overlap pixels of A∩B that sit within tip_frac of A's skeleton tip,
-    erase them from A's mask so A 'merges into' B without redundant overlap.
-
-    Mid-bundle overlaps (legitimate crossings) are preserved -- only overlap
-    pixels in the tip neighbourhood are removed.
-    """
-    if tip_frac <= 0 or len(layers) < 2:
-        return layers, 0
-    masks = [m.copy() for _, m in layers]
-    ids = [cid for cid, _ in layers]
-    bboxes = [_bbox(m) for m in masks]
-    n = len(masks)
-
-    # Per-id tip-distance map and tip neighbourhood radius
-    tip_info: list[tuple[np.ndarray, float] | None] = []
-    for m in masks:
-        sk = skeletonize(m)
-        if int(sk.sum()) < 4:
-            tip_info.append(None)
-            continue
-        nb = convolve(sk.astype(np.uint8),
-                      np.array([[1, 1, 1], [1, 0, 1], [1, 1, 1]], np.uint8),
-                      mode="constant")
-        eps = np.argwhere(sk & (nb == 1))
-        if len(eps) < 1:
-            tip_info.append(None)
-            continue
-        seed = np.zeros(m.shape, dtype=bool)
-        seed[eps[:, 0], eps[:, 1]] = True
-        d = distance_transform_edt(~seed)
-        skel_len = int(sk.sum())
-        radius = max(8.0, float(tip_frac) * float(skel_len))
-        tip_info.append((d, radius))
-
-    trimmed_total = 0
-    for i in range(n):
-        info_i = tip_info[i]
-        if info_i is None:
-            continue
-        d_i, r_i = info_i
-        for j in range(n):
-            if i == j:
-                continue
-            if not _bbox_intersects(bboxes[i], bboxes[j]):
-                continue
-            inter = np.logical_and(masks[i], masks[j])
-            if not inter.any():
-                continue
-            erase = inter & (d_i <= r_i)
-            if not erase.any():
-                continue
-            # Only trim if the overlap is endpoint-dominant for A (>=50% near A's tip)
-            if int(erase.sum()) * 2 < int(inter.sum()):
-                continue
-            masks[i] = masks[i] & ~erase
-            bboxes[i] = _bbox(masks[i])
-            trimmed_total += int(erase.sum())
-    out = [(ids[k], masks[k]) for k in range(n) if masks[k].any()]
-    return out, trimmed_total
 
 
 def colorize(lbl: np.ndarray) -> np.ndarray:
@@ -501,17 +435,12 @@ def main() -> None:
             layered_out.append((out_id, layer.copy()))
 
     # Optional cleanup passes operating on the rendered (thickened) layers.
-    # Order matters: absorption first (eliminates near-duplicate IDs entirely),
-    # then endpoint trim (cleans residual tip overlaps where small ID merges into big).
     overlap_absorb_log: list[tuple[int, int, float]] = []
     if args.overlap_absorb_thr > 0:
         layered_out, overlap_absorb_log = absorb_overlapping_layers(
             layered_out,
             float(args.overlap_absorb_thr),
         )
-    tip_trim_pixels = 0
-    if args.tip_trim_frac > 0:
-        layered_out, tip_trim_pixels = trim_endpoint_overlaps(layered_out, float(args.tip_trim_frac))
     occlusion_trim_log: list[tuple[int, int, float]] = []
     if args.occlusion_trim_thr > 0:
         layered_out, occlusion_trim_log, occlusion_fragment_removed = trim_occluded_layers(
@@ -556,8 +485,6 @@ def main() -> None:
             for a, b, r in overlap_absorb_log
         ],
         "overlap_absorbed_count": len(overlap_absorb_log),
-        "tip_trim_frac": float(args.tip_trim_frac),
-        "tip_trim_pixels": int(tip_trim_pixels),
         "occlusion_trim_thr": float(args.occlusion_trim_thr),
         "occlusion_trim_min_px": int(args.occlusion_trim_min_px),
         "occlusion_fragment_removed_pixels": int(occlusion_fragment_removed),

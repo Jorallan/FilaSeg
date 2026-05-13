@@ -134,7 +134,6 @@ Key CLI flags:
 | `--overlap-absorb-thr` | `0.6` | Post-thickening near-duplicate merge threshold |
 | `--occlusion-trim-thr` | `0.25` | Post-thickening render-layer occlusion trim |
 | `--occlusion-trim-min-px` | `50` | Minimum hidden rendered pixels before occlusion trim |
-| `--tip-trim-frac` | `0.10` | Erase tip-region overlap pixels in postprocess |
 
 The runner creates:
 
@@ -175,7 +174,6 @@ The intent is conservative cleanup: keep the stringart branch identities, remove
 - Redraws it as a slightly thicker label using `--thicken-px`.
 - **Overlap absorb** (`--overlap-absorb-thr`, default 0.6): after thickening, pairs whose intersection covers ≥ this fraction of the smaller mask are merged into the larger. Catches near-duplicate bundles that survive reconnect.
 - **Occlusion trim** (`--occlusion-trim-thr`, `--occlusion-trim-min-px`): trims lower-priority rendered layers whose pixels are mostly already covered by earlier layers, keeps only substantial visible fragments, and hands off detached fragments that already overlap another rendered layer.
-- **Tip trim** (`--tip-trim-frac`): erases overlap pixels near an ID's skeleton tip so it merges cleanly into the neighboring bundle without redundant coverage.
 - Writes post labels, color preview, overlay, and `post_process_summary.json`.
 
 The intent is to make each bundle look like one cleaner physical filament instance before final overlay and DEM JSON export.
