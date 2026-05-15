@@ -51,7 +51,7 @@ DEFAULT_UM_PER_PX  = _REF_UM_PER_PX          # change per dataset, or pass --um-
 # stringart_tiles.py; JSON list = explicit [oy,ox] origins.
 DEFAULT_TILE_SIZE       = 128
 DEFAULT_ANGLE_STEP_DEG  = 15
-DEFAULT_TILE_GRID_OFFSETS  = 8
+DEFAULT_TILE_GRID_OFFSETS  = 4
 DEFAULT_TILE_GRID_VOTE_MIN = 2
 
 # ── Preprocess (stage 2) ──────────────────────────────────────────────────
@@ -358,7 +358,10 @@ def main() -> None:
     _overlap["kill_thr"] = float(args.reco_overlap_kill_thr)
     _overlap["trim_dilate_px"] = int(args.reco_trim_dilate_px)
     _cm = _cfg.setdefault("stage_clear", {}).setdefault("thresholds", {})
-    _cm["clear_merge_backward_max_layer_gap"] = max(1, int(round(4 * DEFAULT_ANGLE_STEP_DEG / max(1, args.angle_step_deg))))
+    _branch_count = max(1, int(round(180 / max(1, args.angle_step_deg))))
+    _default_branch_count = max(1, int(round(180 / DEFAULT_ANGLE_STEP_DEG)))
+    _base_gap = int(_cm.get("clear_merge_backward_max_layer_gap", 3))
+    _cm["clear_merge_backward_max_layer_gap"] = max(1, int(round(_base_gap * _branch_count / _default_branch_count)))
     reconnect_cfg.write_text(_yaml.dump(_cfg, default_flow_style=False, sort_keys=False), encoding="utf-8")
 
     run([

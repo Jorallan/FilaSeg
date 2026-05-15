@@ -87,9 +87,9 @@ stage_clear:
     clear_merge_max_dist_px: 16.0 # clear merge distance cap
     clear_merge_max_line_resid_px: 6.0 # clear merge residual cap
     clear_merge_min_opposition: 0.6 # clear merge opposition
-    clear_merge_overrun_max_dist_px: 24.0 # longer clear merge only for long collinear endpoints that overshot each other
+    clear_merge_overrun_max_dist_px: 30.0 # longer clear merge only for long collinear endpoints that overshot each other
     clear_merge_multitip_min_forward_cos: 0.0 # require non-backward clear merges into multi-tip components
-    clear_merge_backward_max_layer_gap: 4 # block backward clear merges across distant circular orientation bins
+    clear_merge_backward_max_layer_gap: 3 # scaled with branch count by full pipeline; unchanged at angle_step_deg=15
 
 # Stage 2: strict_tip_reconnect
 # Close endpoint reconnects with normal forward, opposition, residual, smoothness, and turn gates.
@@ -120,7 +120,7 @@ stage_relaxed:
     max_passes: 6                # wider pass count
   thresholds:
     merge_mode: normal           # use the full normal evaluator
-    max_tip_distance_px: 55      # wider distance cap
+    max_tip_distance_px: 50      # wider distance cap
     min_forward_cos: 0.72        # relaxed forward alignment
     min_inward_opposition: 0.4   # relaxed tip opposition
     max_turn_deg: 70.0           # wider turn cap
