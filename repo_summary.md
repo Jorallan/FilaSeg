@@ -18,12 +18,14 @@ Tools/
   crop_pair_interactive.py      Matplotlib paired cropper for aligned mask/overlay images.
   run_full_sem_pipeline.py      End-to-end runner for the current SEM bundle workflow.
   scale_helper.py               Physical-scale resolution + pixel-parameter auto-scaling.
+  troubleshoot_reconnect.py     Consolidated reconnect-debug CLI.
   visualize_ids.py              Interactive viewer for label IDs in reconnect/final outputs.
   trace_component.py            Label-ID provenance tool for branch origins.
   mask_edit.py                  Legacy OpenCV mask editing utility.
 
 1.stringart/
-  stringart_tiles.py            Primary line-based vectorizer.
+  skeleton_decompose.py         Experimental/WIP skeleton-first orientation decomposition.
+  stringart_tiles.py            Older tile-wise greedy Hough vectorizer.
 
 2.preprocess/
   preprocess_stringart_branches.py
@@ -50,6 +52,7 @@ The reconnect stage uses the straight evaluator with a staged config. The import
 - A narrow clear-merge overrun allowance for long, collinear two-tip paths whose endpoints slightly overshot each other.
 - Strict then relaxed tip reconnect passes for progressively broader candidate gaps.
 - Same-layer residual relaxation for fragments in the same orientation bin.
+- The full runner rescales `stage_clear.clear_merge_backward_max_layer_gap` with branch count, using the YAML value as the `--angle-step-deg 15` baseline.
 - Relabeling lets longer surviving trunks claim overlaps first.
 - The evaluator can write candidate rejection/acceptance metrics to `debug.rejection_log_path`.
 - Shared tip tracing and bridge sampling settings live under `geometry`; true pass gates live under each stage.
@@ -73,7 +76,7 @@ Reconnect resolves heavy component overlaps with settings grouped under the `ove
 - `mode: kill` (legacy): drop the entire smaller component when overlap exceeds `kill_thr`.
 - `mode: trim` (recommended): erase only the pixels that overlap the larger component, then re-CC the remainder. Every sub-component with area ≥ `min_keep_area` survives as its own fresh Component and can participate in downstream tip-bridging. Sub-components below the threshold are dropped.
 
-`overlap.trim_dilate_px > 0` adds a temporary halo to the larger component during the overlap test only. The halo is not persisted and is not subtracted from the smaller component, which avoids carving artificial gaps into adjacent filaments.
+`overlap.trim_dilate_px > 0` adds a temporary halo to the larger component during the overlap test only. The halo can make near-adjacent components qualify for trim/kill scoring, but the actual trim still subtracts only the larger component's real pixels. The halo is not persisted. Direct reconnect YAML currently sets this to `10`; the full runner overrides it from `--reco-trim-dilate-px`, whose default is `0`.
 
 ### Layered Multi-Label Output
 
@@ -86,15 +89,21 @@ After each reconnect run `reconnect_run.py` writes:
 <base>_reconnect_overlap.png      pixels covered by ≥ 2 IDs
 ```
 
+## Stage 1 Options
+
+The full runner currently defaults to `skeleton_decompose.py`, which skeletonizes the full mask and bins centerline pixels by local tangent orientation. This path is still work in progress and is not final production behavior yet; its outputs should still be reviewed. Pass `--no-skeleton-decompose` to use `stringart_tiles.py` instead.
+
 ## Stringart Acceptance
 
-`1.stringart/stringart_tiles.py` uses conservative Hough defaults plus a mask-support density gate:
+`1.stringart/stringart_tiles.py` is the older tiled Hough stage and uses conservative Hough defaults plus a mask-support density gate:
 
 The goal is to reject fake long chords over black background. A line can still bridge tiny raster gaps, but most of the proposed line must lie on the original mask. `--min-accept-density`, `--residual-dilate-kernel`, and `--residual-dilate-iters` are exposed as CLI overrides.
 
 ### Multi-Grid Voting
 
-The pipeline can run stringart at multiple tile-grid origins and keep only pixels that appear in at least `--tile-grid-vote-min` of them. By default `--tile-grid-offsets` is omitted, which means a single grid. Pass an integer count (`1`, `2`, `3`, `4`, etc.) to generate offsets from the tile size; `4` restores the previous half-tile four-grid pattern. You can still pass an explicit JSON list of `[oy,ox]` pairs.
+The pipeline can run stringart at multiple tile-grid origins and keep only pixels that appear in at least `--tile-grid-vote-min` of them. Direct `stringart_tiles.py` runs default to a single grid; when the full runner uses `stringart_tiles.py`, it currently passes `4` generated offsets with vote minimum `2`. Pass an integer count (`1`, `2`, `3`, `4`, etc.) to generate offsets from the tile size; `4` restores the previous half-tile four-grid pattern. You can still pass an explicit JSON list of `[oy,ox]` pairs.
+
+`stringart_tiles.py` also scales `MAX_LINES_PER_TILE` and `MAX_CANDIDATES_TO_TRY` by `(tile_size / 128)^2`, keeping those two workload limits proportional to tile area.
 
 ## Physical-Scale Auto-Scaling
 
@@ -127,8 +136,10 @@ Key CLI flags:
 | `--reco-trim-dilate-px` | `0` | Halo radius (px) for the trim test |
 | `--um-per-px` | auto | µm/px for scale-factor computation |
 | `--no-scale` | off | Disable pixel-parameter scaling |
-| `--tile-grid-offsets` | omitted / `1` | Stringart tile-grid origin count or explicit origins |
-| `--tile-grid-vote-min` | `2` | Min grids a pixel must appear in |
+| `--skeleton-decompose` | on | Use skeleton decomposition for stage 1; pass `--no-skeleton-decompose` for tiled Hough stringart |
+| `--angle-step-deg` | `15` | Stringart orientation-bin width; also sets branch count used to scale clear-merge backward layer gap |
+| `--tile-grid-offsets` | `4` | Tiled stringart grid-origin count or explicit origins |
+| `--tile-grid-vote-min` | `2` | Min tiled-stringart grids a pixel must appear in |
 | `--pre-fit-degree` | `2` | B-spline degree for preprocess skeleton smoothing (0=skip) |
 | `--pre-fit-smoothing` | `1.5` | Spline smoothing factor multiplier |
 | `--overlap-absorb-thr` | `0.6` | Post-thickening near-duplicate merge threshold |
@@ -167,7 +178,7 @@ The intent is conservative cleanup: keep the stringart branch identities, remove
 
 `4.postprocess/post_process_reconnect.py` prepares reconnect labels for the final handoff:
 
-- Reads the raw `*_reconnect_labels.tif` instance image.
+- Reads layered reconnect IDs when `*_reconnect_multilabel.npz` exists, else falls back to the flat `*_reconnect_labels.tif` image.
 - Drops very short pieces below `--min-keep-len`.
 - Skeletonizes each kept bundle and extracts a dominant centerline.
 - Smooths that centerline with `--smooth-window`.
@@ -195,6 +206,15 @@ python Tools\trace_component.py `
   --run output\full_pipeline\<base> `
   --step final `
   --ids 25 38 42
+```
+
+Reconnect troubleshooting now lives in one CLI instead of four one-off scripts:
+
+```powershell
+python Tools\troubleshoot_reconnect.py compare-followups --old-run <old> --new-run <new> --pairs 31,14 13,43
+python Tools\troubleshoot_reconnect.py diagnose-missed --run <base> --pairs 31,14 13,43
+python Tools\troubleshoot_reconnect.py check-coords --run <base> --coords "pairA|120,240|130,248"
+python Tools\troubleshoot_reconnect.py trace-evolution --old-run <old> --new-run <new> --ids 8 9 11
 ```
 
 ## DEM JSON Contract

@@ -10,12 +10,14 @@ The current CNT workflow starts from a binary mask and a greyscale/overlay image
 Tools/
   crop_pair_interactive.py      Interactive paired cropper for mask + overlay images.
   run_full_sem_pipeline.py      End-to-end SEM mask -> bundles runner.
+  troubleshoot_reconnect.py     Consolidated reconnect-debug CLI.
   visualize_ids.py             Interactive label-ID viewer for reconnect/final outputs.
   trace_component.py           Trace label IDs back to preprocess/stringart branches.
   mask_edit.py                  Legacy/manual mask editor utility.
 
 1.stringart/
-  stringart_tiles.py            Tile-wise greedy vectorizer.
+  skeleton_decompose.py         Experimental/WIP skeleton-first orientation decomposition.
+  stringart_tiles.py            Older tile-wise greedy Hough vectorizer.
 
 2.preprocess/
   preprocess_stringart_branches.py
@@ -96,6 +98,15 @@ python Tools\trace_component.py `
   --ids 25 38 42
 ```
 
+For reconnect debugging, use the consolidated troubleshooting CLI instead of the older split helper scripts:
+
+```powershell
+python Tools\troubleshoot_reconnect.py compare-followups --old-run <old> --new-run <new> --pairs 31,14 13,43
+python Tools\troubleshoot_reconnect.py diagnose-missed --run <base> --pairs 31,14 13,43
+python Tools\troubleshoot_reconnect.py check-coords --run <base> --coords "pairA|120,240|130,248"
+python Tools\troubleshoot_reconnect.py trace-evolution --old-run <old> --new-run <new> --ids 8 9 11
+```
+
 ## DEM JSON
 
 `<base>_bundles_dem.json` uses schema `filaseg.dem_bundles.v1`. Coordinates are stored in pixels with origin at the top-left. Each bundle includes id, area, bounding box, centroid, estimated length, mean width, endpoints, and centerline in both `rc` (`row, col`) and `xy` (`x=col, y=row`) forms.
@@ -104,15 +115,19 @@ python Tools\trace_component.py `
 
 `2.preprocess/preprocess_stringart_branches.py` runs after stringart and before reconnect. It thresholds each per-angle branch image, removes tiny connected components, applies an angle-matched morphological close to bridge small gaps inside each branch, optionally reduces multi-tip components to their dominant smoothed two-tip skeleton path, and writes a cleaned branch set plus a merged preview and JSON summary. It uses `run_config.json` from stringart to know the angle of each branch. The full runner exposes this as `--pre-clean-to-path` / `--no-pre-clean-to-path` and `--pre-clean-smooth-win`.
 
-`4.postprocess/post_process_reconnect.py` runs after reconnect. It splits disconnected pieces that share a label, drops very short fragments, absorbs short nearby pieces into longer neighboring bundles, skeletonizes each kept bundle, extracts its dominant path, smooths that path with a moving window, redraws the bundle as a slightly thicker polyline, and writes final labels, color preview, overlay, and a summary. The full runner then copies these into `final` and builds the DEM JSON.
+`4.postprocess/post_process_reconnect.py` runs after reconnect. It reads layered reconnect IDs when available, drops very short bundles, skeletonizes each kept layer, extracts its dominant path, smooths that path with a moving window, redraws the bundle as a slightly thicker polyline, optionally absorbs heavily overlapping rendered layers, optionally trims lower-priority rendered layers hidden by earlier ones, and writes final labels, color preview, overlay, and a summary. The full runner then copies these into `final` and builds the DEM JSON.
 
-Reconnect rejection logging can be enabled through the `debug.rejection_log_path` key in `3.reconnect/reconnect_config.yaml`; the straight evaluator writes candidate accept/reject metrics to that CSV path.
+Reconnect rejection logging can be enabled through the `debug.rejection_log_path` key in `3.reconnect/reconnect_config.yaml`; the straight evaluator writes candidate accept/reject metrics to that CSV path. When the full runner changes `--angle-step-deg`, it also rescales `clear_merge_backward_max_layer_gap` from the 15-degree YAML baseline to keep the allowed orientation span comparable as branch count changes.
+
+## Stage 1 Options
+
+The full runner currently defaults to `skeleton_decompose.py`, which skeletonizes the full mask and groups centerline pixels into orientation bins from their local tangent direction. This path is still work in progress and is not final production behavior yet; inspect its outputs before relying on them. Pass `--no-skeleton-decompose` to use the older tiled Hough stage instead.
 
 ## Stringart Acceptance
 
-The default stringart config is conservative again. A candidate line must now satisfy both gates: enough new residual pixels and enough support density on the original mask. The density gate rejects long fake chords that touch a few CNT pixels but mostly cross black background.
+`stringart_tiles.py` is the older tiled Hough stage. Its candidate lines must satisfy both gates: enough new residual pixels and enough support density on the original mask. The density gate rejects long fake chords that touch a few CNT pixels but mostly cross black background.
 
-Tile-grid voting can be enabled with `--tile-grid-offsets`: omit it or pass `1` for a single grid, pass `4` for the previous half-tile four-grid pattern, or pass an explicit JSON list of `[oy,ox]` origins.
+Direct `stringart_tiles.py` runs default to a single grid. When the full runner uses `stringart_tiles.py`, it currently passes `--tile-grid-offsets 4` and `--tile-grid-vote-min 2`. For manual runs, omit `--tile-grid-offsets` or pass `1` for a single grid, pass any integer count to generate that many offsets (`4` gives the half-tile four-grid pattern), or pass an explicit JSON list of `[oy,ox]` origins. `MAX_LINES_PER_TILE` and `MAX_CANDIDATES_TO_TRY` scale with `(tile_size / 128)^2`; the other tile defaults do not change just because tile size changes.
 
 ```powershell
 python 1.stringart\stringart_tiles.py `
