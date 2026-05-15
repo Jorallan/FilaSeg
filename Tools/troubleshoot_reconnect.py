@@ -5,14 +5,18 @@ Subcommands cover:
   - diagnose-missed: explain likely gates for postprocess ID pairs that stayed split
   - check-coords: sample two coordinates and report whether they share a final ID
   - trace-evolution: compare old postprocess IDs against a newer run
+  - visualize-pairs: render pair crops over the SEM image
+  - trace-component: trace one run's IDs back to preprocess/stringart branches
 """
 from __future__ import annotations
 
 import argparse
 import csv
+import re
 from collections import Counter, deque
 from pathlib import Path
 
+import cv2
 import imageio.v3 as iio
 import numpy as np
 import tifffile
@@ -23,6 +27,11 @@ from skimage.morphology import skeletonize
 ROOT = Path(__file__).resolve().parents[1]
 PIPELINE_ROOT = ROOT / "output" / "full_pipeline"
 DEFAULT_REJECTION_LOG = ROOT / "3.reconnect" / "output" / "rejection_log_straight.csv"
+DEFAULT_TRACE_RUN = PIPELINE_ROOT / "sem_full_00008_mask255_crop_20260507_105149"
+PAIR_COLORS = {
+    "a": (0, 200, 255),
+    "b": (0, 80, 255),
+}
 
 
 def resolve_run_dir(value: str | Path) -> Path:
@@ -310,6 +319,124 @@ def print_branch_contributions(title: str, branches: dict[int, np.ndarray], regi
             print(f"       branch {idx:2d}: {overlap:5d}px")
 
 
+def crop_around(arr: np.ndarray, r0: int, r1: int, c0: int, c1: int, pad: int = 20) -> tuple[int, int, int, int, np.ndarray]:
+    height, width = arr.shape[:2]
+    r0 = max(0, r0 - pad)
+    r1 = min(height, r1 + pad)
+    c0 = max(0, c0 - pad)
+    c1 = min(width, c1 + pad)
+    return r0, r1, c0, c1, arr[r0:r1, c0:c1]
+
+
+def draw_bundle(canvas: np.ndarray, mask: np.ndarray, color: tuple[int, int, int], alpha: float = 0.55) -> np.ndarray:
+    overlay = canvas.copy()
+    overlay[mask > 0] = color
+    return cv2.addWeighted(overlay, alpha, canvas, 1 - alpha, 0)
+
+
+def render_pair_crop(sem_rgb: np.ndarray, labels: np.ndarray, label_a: int, label_b: int, pad: int) -> np.ndarray | None:
+    mask_a = labels == label_a
+    mask_b = labels == label_b
+    if not mask_a.any() or not mask_b.any():
+        return None
+    pts_a = np.argwhere(mask_a)
+    pts_b = np.argwhere(mask_b)
+    r0 = min(pts_a[:, 0].min(), pts_b[:, 0].min())
+    r1 = max(pts_a[:, 0].max(), pts_b[:, 0].max())
+    c0 = min(pts_a[:, 1].min(), pts_b[:, 1].min())
+    c1 = max(pts_a[:, 1].max(), pts_b[:, 1].max())
+    r0, r1, c0, c1, crop = crop_around(sem_rgb, r0, r1, c0, c1, pad=pad)
+    out = draw_bundle(crop.copy(), mask_a[r0:r1, c0:c1].astype(np.uint8) * 255, PAIR_COLORS["a"])
+    out = draw_bundle(out, mask_b[r0:r1, c0:c1].astype(np.uint8) * 255, PAIR_COLORS["b"])
+    cv2.putText(out, f"A={label_a}", (5, 18), cv2.FONT_HERSHEY_SIMPLEX, 0.5, PAIR_COLORS["a"], 1, cv2.LINE_AA)
+    cv2.putText(out, f"B={label_b}", (5, 36), cv2.FONT_HERSHEY_SIMPLEX, 0.5, PAIR_COLORS["b"], 1, cv2.LINE_AA)
+    return out
+
+
+def branch_index(path: Path) -> int:
+    match = re.search(r"_branch_(\d+)", path.stem)
+    return int(match.group(1)) if match else -1
+
+
+def find_label_tif(step_path: Path) -> Path:
+    for pattern in ("*_post_labels.tif", "*_reconnect_labels.tif", "*_labels.tif"):
+        hits = [path for path in step_path.glob(pattern) if "dilated" not in path.stem]
+        if hits:
+            return sorted(hits)[0]
+    raise FileNotFoundError(f"No label TIFF found in {step_path}")
+
+
+def trace_step_dir(run_dir: Path, step: str) -> Path:
+    mapping = {
+        "final": run_dir / "final",
+        "reconnect": run_dir / "3.reconnect",
+        "postprocess": run_dir / "4.postprocess",
+        "preprocess": run_dir / "2.preprocess" / "branches",
+    }
+    try:
+        return mapping[step.lower()]
+    except KeyError as exc:
+        raise ValueError(f"Unknown step '{step}'. Choose: final, reconnect, postprocess, preprocess.") from exc
+
+
+def branch_files(run_dir: Path) -> list[Path]:
+    return sorted((run_dir / "2.preprocess" / "branches").glob("*_branch_*.png"), key=branch_index)
+
+
+def raw_branch_files(run_dir: Path) -> list[Path]:
+    raw_dir = run_dir / "2.preprocess" / "raw_branches"
+    if not raw_dir.exists():
+        return []
+    return sorted(raw_dir.glob("*_branch_*.png"), key=branch_index)
+
+
+def load_bin(path: Path) -> np.ndarray:
+    img = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
+    return img > 0 if img is not None else np.zeros((1, 1), dtype=bool)
+
+
+def trace_single_id(labels: np.ndarray, label_id: int, branches: list[Path], raw_branches: list[Path]) -> dict:
+    mask = labels == label_id
+    if not mask.any():
+        return {"id": label_id, "found": False}
+
+    pts = np.argwhere(mask)
+    r0, c0 = pts.min(0).tolist()
+    r1, c1 = pts.max(0).tolist()
+    raw_map = {path.name: path for path in raw_branches}
+    branch_hits = []
+    for branch_path in branches:
+        branch_mask = load_bin(branch_path)
+        if branch_mask.shape != mask.shape:
+            continue
+        overlap = int(np.count_nonzero(mask & branch_mask))
+        if overlap == 0:
+            continue
+        raw_overlap = 0
+        raw_path = raw_map.get(branch_path.name)
+        if raw_path:
+            raw_mask = load_bin(raw_path)
+            if raw_mask.shape == mask.shape:
+                raw_overlap = int(np.count_nonzero(mask & raw_mask))
+        branch_hits.append(
+            {
+                "branch": branch_index(branch_path),
+                "file": branch_path.name,
+                "preprocess_px": overlap,
+                "stringart_px": raw_overlap,
+            }
+        )
+    branch_hits.sort(key=lambda item: -item["preprocess_px"])
+    return {
+        "id": label_id,
+        "found": True,
+        "area_px": int(mask.sum()),
+        "bbox_rc": [r0, c0, r1, c1],
+        "dominant_branch": branch_hits[0]["branch"] if branch_hits else None,
+        "branches": branch_hits,
+    }
+
+
 def compare_followups(args: argparse.Namespace) -> None:
     old_dir = resolve_run_dir(args.old_run)
     new_dir = resolve_run_dir(args.new_run)
@@ -495,6 +622,61 @@ def trace_evolution(args: argparse.Namespace) -> None:
         print(f"    (was present in old stringart: {int(was_in_old.sum()):5d}px)")
 
 
+def visualize_pairs(args: argparse.Namespace) -> None:
+    run_dir = resolve_run_dir(args.run)
+    labels = load_post_labels(run_dir)
+    sem_path = Path(args.sem).resolve() if args.sem else ROOT / "input" / "sem_full_00000_1p66_crop512" / "sem.png"
+    sem = cv2.imread(str(sem_path), cv2.IMREAD_GRAYSCALE)
+    if sem is None:
+        raise FileNotFoundError(f"Could not read SEM image: {sem_path}")
+    sem_rgb = cv2.cvtColor(sem, cv2.COLOR_GRAY2BGR)
+    out_dir = Path(args.output).resolve() if args.output else run_dir / "missed_pairs_diag"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    for label_a, label_b in parse_pairs(args.pairs):
+        img = render_pair_crop(sem_rgb, labels, label_a, label_b, pad=args.pad)
+        if img is None:
+            print(f"  skipping {label_a},{label_b}: not found")
+            continue
+        scale = max(1, int(np.ceil(args.min_size / min(img.shape[:2]))))
+        if scale > 1:
+            img = cv2.resize(img, (img.shape[1] * scale, img.shape[0] * scale), interpolation=cv2.INTER_NEAREST)
+        path = out_dir / f"pair_{label_a}_{label_b}.png"
+        cv2.imwrite(str(path), img)
+        print(f"  saved {path}  ({img.shape[1]}x{img.shape[0]})")
+
+
+def trace_component(args: argparse.Namespace) -> None:
+    run_dir = resolve_run_dir(args.run)
+    labels_dir = trace_step_dir(run_dir, args.step)
+    labels_path = find_label_tif(labels_dir)
+    labels = iio.imread(labels_path).astype(np.int32)
+    branches = branch_files(run_dir)
+    raw_branches = raw_branch_files(run_dir)
+
+    print(f"Run     : {run_dir.name}")
+    print(f"Step    : {args.step} ({labels_path.name})")
+    print(f"Branches: {len(branches)} preprocess | {len(raw_branches)} raw stringart")
+    print()
+
+    for label_id in args.ids:
+        info = trace_single_id(labels, label_id, branches, raw_branches)
+        if not info["found"]:
+            print(f"  ID {label_id}: NOT FOUND in {labels_path.name}")
+            continue
+        r0, c0, r1, c1 = info["bbox_rc"]
+        print(
+            f"ID {label_id:4d}  area={info['area_px']:5d}px"
+            f"  bbox=r[{r0}:{r1}] c[{c0}:{c1}]  dominant_branch={info['dominant_branch']}"
+        )
+        if not args.quiet:
+            for hit in info["branches"]:
+                bar = "#" * max(1, hit["preprocess_px"] // 5)
+                raw_note = f"  (stringart: {hit['stringart_px']}px)" if hit["stringart_px"] else "  (not in raw)"
+                print(f"    branch_{hit['branch']:02d}  pre={hit['preprocess_px']:4d}px {bar}{raw_note}")
+        print()
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Reconnect troubleshooting utilities.")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -527,6 +709,27 @@ def build_parser() -> argparse.ArgumentParser:
     trace.add_argument("--old-run", default="sem_full_00000_1p66_crop512_b")
     trace.add_argument("--ids", type=int, nargs="+", default=[8, 9, 11])
     trace.set_defaults(func=trace_evolution)
+
+    visualize = subparsers.add_parser("visualize-pairs", help="Render crops for pair review over the SEM image.")
+    visualize.add_argument("--run", default="sem_full_00000_1p66_crop512_SKEL")
+    visualize.add_argument("--sem", default=None, help="Optional SEM image override.")
+    visualize.add_argument("--pairs", nargs="+", required=True, help='Pair list like "31,14 13,43".')
+    visualize.add_argument("--output", default=None, help="Optional output folder override.")
+    visualize.add_argument("--pad", type=int, default=20, help="Padding around each pair crop.")
+    visualize.add_argument("--min-size", type=int, default=300, help="Upscale crops smaller than this size.")
+    visualize.set_defaults(func=visualize_pairs)
+
+    component = subparsers.add_parser("trace-component", help="Trace one run's IDs back to source branches.")
+    component.add_argument("--run", default=str(DEFAULT_TRACE_RUN), help="Pipeline run root folder.")
+    component.add_argument(
+        "--step",
+        default="final",
+        choices=["final", "reconnect", "postprocess", "preprocess"],
+        help="Which step's label TIFF to start from.",
+    )
+    component.add_argument("--ids", type=int, nargs="+", default=[25, 38, 39, 42, 68], help="Label IDs to trace.")
+    component.add_argument("--quiet", action="store_true", help="Only print dominant branch per ID.")
+    component.set_defaults(func=trace_component)
 
     return parser
 

@@ -12,7 +12,6 @@ Tools/
   run_full_sem_pipeline.py      End-to-end SEM mask -> bundles runner.
   troubleshoot_reconnect.py     Consolidated reconnect-debug CLI.
   visualize_ids.py             Interactive label-ID viewer for reconnect/final outputs.
-  trace_component.py           Trace label IDs back to preprocess/stringart branches.
   mask_edit.py                  Legacy/manual mask editor utility.
 
 1.stringart/
@@ -92,7 +91,7 @@ For direct IDE/script use, edit `SCRIPT_INPUT` in `Tools/visualize_ids.py`, or r
 To trace final or intermediate label IDs back to their preprocess/stringart branch origins:
 
 ```powershell
-python Tools\trace_component.py `
+python Tools\troubleshoot_reconnect.py trace-component `
   --run output\full_pipeline\<base> `
   --step final `
   --ids 25 38 42
@@ -105,6 +104,8 @@ python Tools\troubleshoot_reconnect.py compare-followups --old-run <old> --new-r
 python Tools\troubleshoot_reconnect.py diagnose-missed --run <base> --pairs 31,14 13,43
 python Tools\troubleshoot_reconnect.py check-coords --run <base> --coords "pairA|120,240|130,248"
 python Tools\troubleshoot_reconnect.py trace-evolution --old-run <old> --new-run <new> --ids 8 9 11
+python Tools\troubleshoot_reconnect.py visualize-pairs --run <base> --pairs 31,14 13,43
+python Tools\troubleshoot_reconnect.py trace-component --run output\full_pipeline\<base> --step final --ids 25 38 42
 ```
 
 ## DEM JSON
