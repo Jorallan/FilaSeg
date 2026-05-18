@@ -90,7 +90,12 @@ After each reconnect run `reconnect_run.py` writes:
 
 ## Stage 1 Options
 
-The full runner currently defaults to `skeleton_decompose.py`, which skeletonizes the full mask and bins centerline pixels by local tangent orientation. This path is still work in progress and is not final production behavior yet; its outputs should still be reviewed. Pass `--no-skeleton-decompose` to use `stringart_tiles.py` instead.
+The full runner currently defaults to `skeleton_decompose.py`, which skeletonizes the full mask and bins centerline pixels by local tangent orientation. Two algorithms keep smoothly-curving filaments together when the angle bins would otherwise fragment them:
+
+- **Adaptive binning**: per-pixel binning runs first. If a single skeleton piece's pixels span only a few cyclically-adjacent bins (a smooth curve crossing one bin boundary), the entire piece is unified to its dominant bin. Pieces that span many non-adjacent bins (genuine sharp turns) keep the per-pixel split. Controlled by `ADAPTIVE_BIN_MAX_SPAN` (default `2`) and `ADAPTIVE_BIN_MIN_FRAC` (default `0.1`).
+- **Smart junction merge**: at each 8-connected junction blob, the tangents of adjacent skeleton arms (walked outward `SMART_JUNCTION_WALK_STEPS` pixels) are compared. A pair is fused if both arms have at least `SMART_JUNCTION_MIN_ARM_PX` pixels and their tangents are anti-parallel with `cos < SMART_JUNCTION_COS_THR`. The whole junction blob is added to the merged piece as a bridge so its connected component physically spans both arms. `SMART_JUNCTION_HANDLE_X` extends the same rule to 4-arm X-crossings.
+
+`run_config.json` records the CONFIG used per run and the resulting counts: `n_smart_junction_merges`, `n_through_junction_pixels`, `n_adaptive_unified_pieces`. Both algorithms are conservative by default; they will not fuse a 90-degree T-arm into a through-bundle. Pass `--no-skeleton-decompose` to use `stringart_tiles.py` instead.
 
 ## Stringart Acceptance
 
@@ -136,9 +141,17 @@ Key CLI flags:
 | `--um-per-px` | auto | µm/px for scale-factor computation |
 | `--no-scale` | off | Disable pixel-parameter scaling |
 | `--skeleton-decompose` | on | Use skeleton decomposition for stage 1; pass `--no-skeleton-decompose` for tiled Hough stringart |
+| `--smart-junction-merge` | on | Fuse anti-parallel arms at junction blobs in stage 1 |
+| `--smart-junction-cos-thr` | `-0.90` | Cosine threshold for collinear-arm fusion (more negative = stricter) |
+| `--smart-junction-walk-steps` | `10` | Pixels walked outward to estimate each arm's tangent |
+| `--smart-junction-min-arm-px` | `25` | Minimum length each arm must have for fusion |
+| `--smart-junction-handle-x` | on | Also process 4-arm X-crossings (pair-by-pair) |
+| `--adaptive-bin-max-span` | `2` | Max adjacent bins a single piece may span before staying per-pixel |
+| `--adaptive-bin-min-frac` | `0.1` | Fraction-of-dominant threshold for counting a bin as significant |
 | `--angle-step-deg` | `15` | Stringart orientation-bin width; also sets branch count used to scale clear-merge backward layer gap |
 | `--tile-grid-offsets` | `4` | Tiled stringart grid-origin count or explicit origins |
 | `--tile-grid-vote-min` | `2` | Min tiled-stringart grids a pixel must appear in |
+| `--smart-width` | on | Render postprocess IDs from SEM edge samples; those masks also drive absorb/trim cleanup |
 | `--pre-fit-degree` | `2` | B-spline degree for preprocess skeleton smoothing (0=skip) |
 | `--pre-fit-smoothing` | `1.5` | Spline smoothing factor multiplier |
 | `--overlap-absorb-thr` | `0.6` | Post-thickening near-duplicate merge threshold |
@@ -181,9 +194,9 @@ The intent is conservative cleanup: keep the stringart branch identities, remove
 - Drops very short pieces below `--min-keep-len`.
 - Skeletonizes each kept bundle and extracts a dominant centerline.
 - Smooths that centerline with `--smooth-window`.
-- Redraws it as a slightly thicker label using `--thicken-px`.
-- **Overlap absorb** (`--overlap-absorb-thr`, default 0.6): after thickening, pairs whose intersection covers ≥ this fraction of the smaller mask are merged into the larger. Catches near-duplicate bundles that survive reconnect.
-- **Occlusion trim** (`--occlusion-trim-thr`, `--occlusion-trim-min-px`): trims lower-priority rendered layers whose pixels are mostly already covered by earlier layers, keeps only substantial visible fragments, and hands off detached fragments that already overlap another rendered layer.
+- Renders each kept path at one SEM-guided width per ID by sampling opposite-slope edge pairs normal to the path (`--smart-width`, default on). If edge evidence is too weak, it falls back to `--thicken-px`.
+- **Overlap absorb** (`--overlap-absorb-thr`, default 0.6): on those smart-width masks, pairs whose intersection covers ≥ this fraction of the smaller mask are merged into the larger. Catches near-duplicate bundles that survive reconnect.
+- **Occlusion trim** (`--occlusion-trim-thr`, `--occlusion-trim-min-px`): also on the smart-width masks, trims lower-priority rendered layers whose pixels are mostly already covered by earlier layers, keeps only substantial visible fragments, and hands off detached fragments that already overlap another rendered layer.
 - Writes post labels, color preview, overlay, and `post_process_summary.json`.
 
 The intent is to make each bundle look like one cleaner physical filament instance before final overlay and DEM JSON export.
