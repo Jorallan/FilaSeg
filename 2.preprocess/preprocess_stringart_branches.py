@@ -29,7 +29,7 @@ DEFAULT_CLEAN_TO_PATH      = True # reduce each component to its smoothed domina
 DEFAULT_CLEAN_SMOOTH_WIN   = 7    # moving-average window applied to the dominant path before redrawing
 DEFAULT_TARGET_WIDTH_PX    = 0    # 0 = use per-branch median width; >0 = render every component at this width
 DEFAULT_FIT_DEGREE         = 2    # 0=skip spline fit (moving-avg only); 1/2/3=parametric B-spline degree
-DEFAULT_FIT_SMOOTHING      = 1.5  # spline smoothing factor multiplier (higher = stiffer, more polynomial-like)
+DEFAULT_FIT_SMOOTHING      = 2.0  # spline smoothing factor multiplier (higher = stiffer, more polynomial-like)
 # ─────────────────────────────────────────────────────────────────────────
 
 
