@@ -74,7 +74,7 @@ CONFIG = {
     # spur pruning: remove skeleton tips whose path back to a junction is
     # shorter than this. 0 disables. Helps avoid spurious junctions caused by
     # bumpy mask edges.
-    "SPUR_PRUNE_PX":      5,
+    "SPUR_PRUNE_PX":      3,
 
     # filament width estimation (same convention as stringart_tiles)
     "WIDTH_PERCENTILE":   60.0,
@@ -87,7 +87,30 @@ CONFIG = {
     "BRANCH_DILATE_PAD_PX": 1,
 
     # discard pieces whose ordered length is below this many pixels
-    "MIN_PIECE_LEN":      4,
+    "MIN_PIECE_LEN":      7,
+
+    # adaptive binning: when per-pixel binning gives a single skeleton piece
+    # pixels spread across <= ADAPTIVE_BIN_MAX_SPAN cyclically-adjacent bins,
+    # unify the whole piece to its dominant bin. This keeps smoothly-curving
+    # filaments that cross an angle-bin boundary together as one bundle.
+    # A bin is "significant" if it holds >= ADAPTIVE_BIN_MIN_FRAC of the
+    # dominant bin's pixel count.
+    "ADAPTIVE_BIN_MAX_SPAN":   2,
+    "ADAPTIVE_BIN_MIN_FRAC":   0.1,
+
+    # smart junction merging: at every 3-arm skeleton junction blob, fuse a
+    # pair of arms if their tangents (pointing AWAY from junction) are very
+    # anti-parallel (cos < SMART_JUNCTION_COS_THR) and both arms have at
+    # least SMART_JUNCTION_MIN_ARM_PX pixels. Skipped at >=4-arm junctions
+    # (X-crossings) where through-pair detection is ambiguous.
+    "SMART_JUNCTION_MERGE":       True,
+    "SMART_JUNCTION_WALK_STEPS":  10,
+    "SMART_JUNCTION_COS_THR":     -0.90,
+    "SMART_JUNCTION_MIN_ARM_PX":  25,
+    # Allow merging at X-crossings (4-arm junction blobs). When True, the
+    # best collinear pair is merged greedily; the remaining two arms are then
+    # considered as a second pair (they get merged separately if also collinear).
+    "SMART_JUNCTION_HANDLE_X":    True,
 }
 
 
@@ -238,6 +261,172 @@ def split_at_junctions(skel_bool: np.ndarray, junction_dilate_px: int):
     return pieces, junc_dil
 
 
+def _arm_tangent_from_junction(piece_mask: np.ndarray, junc_rc: Tuple[int, int],
+                               entry_rc: Tuple[int, int], walk_steps: int):
+    """Walk along piece_mask from entry_rc, away from junc_rc, up to walk_steps
+    pixels, and return a unit tangent (dr, dc) pointing away from the junction.
+    Returns None if the walk produces a zero-length vector.
+    """
+    H, W = piece_mask.shape
+    visited = {entry_rc}
+    cur = entry_rc
+    prev = junc_rc
+    end = entry_rc
+    for _ in range(int(walk_steps)):
+        cr, cc = cur
+        nbrs = []
+        for dr in (-1, 0, 1):
+            for dc in (-1, 0, 1):
+                if dr == 0 and dc == 0:
+                    continue
+                nr, nc = cr + dr, cc + dc
+                if (0 <= nr < H and 0 <= nc < W and piece_mask[nr, nc]
+                        and (nr, nc) != prev and (nr, nc) not in visited):
+                    nbrs.append((nr, nc))
+        if not nbrs:
+            break
+        nbrs.sort(key=lambda p: abs(p[0] - cr) + abs(p[1] - cc))
+        nxt = nbrs[0]
+        visited.add(nxt)
+        prev, cur = cur, nxt
+        end = cur
+    dr_v = float(end[0]) - float(junc_rc[0])
+    dc_v = float(end[1]) - float(junc_rc[1])
+    n = math.hypot(dr_v, dc_v)
+    if n < 1e-6:
+        return None
+    return (dr_v / n, dc_v / n)
+
+
+def smart_merge_collinear_at_junctions(labels: np.ndarray,
+                                       junctions: np.ndarray,
+                                       n_lab: int,
+                                       walk_steps: int = 15,
+                                       collinear_cos_thr: float = -0.95,
+                                       min_arm_len_px: int = 15,
+                                       handle_x: bool = True):
+    """Conservative collinear-arm merge at skeleton junctions.
+
+    For each 8-connected junction blob, collect arms (= adjacent skeleton
+    pieces with size >= min_arm_len_px). At 3-arm junctions only, fuse the
+    most-anti-parallel pair if their tangent dot product <= collinear_cos_thr.
+    X-crossings (4+ arms) and small-arm junctions are skipped.
+
+    Returns:
+        new_labels: pieces relabeled contiguously after union-find merges.
+        through_pts: set of junction blob pixels assigned to a merged piece
+                     (used to bridge the skeleton across the junction blob).
+    """
+    H, W = labels.shape
+    parent = list(range(n_lab + 1))
+
+    def find(x: int) -> int:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a: int, b: int) -> None:
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[ra] = rb
+
+    unique_pids, counts = np.unique(labels[labels > 0], return_counts=True)
+    piece_size = dict(zip(unique_pids.tolist(), counts.tolist()))
+
+    n_blobs, blob_labels = cv2.connectedComponents(
+        junctions.astype(np.uint8), connectivity=8)
+    through_junc: dict[Tuple[int, int], int] = {}
+
+    for blob_id in range(1, n_blobs):
+        blob_pixels = np.argwhere(blob_labels == blob_id)
+        arms = []
+        seen_pid = set()
+        for br, bc in blob_pixels:
+            for dr in (-1, 0, 1):
+                for dc in (-1, 0, 1):
+                    if dr == 0 and dc == 0:
+                        continue
+                    rr, cc = br + dr, bc + dc
+                    if not (0 <= rr < H and 0 <= cc < W):
+                        continue
+                    pid = int(labels[rr, cc])
+                    if pid <= 0 or pid in seen_pid:
+                        continue
+                    seen_pid.add(pid)
+                    if piece_size.get(pid, 0) < int(min_arm_len_px):
+                        continue
+                    piece_mask = (labels == pid)
+                    tan = _arm_tangent_from_junction(
+                        piece_mask, (int(br), int(bc)),
+                        (int(rr), int(cc)), walk_steps)
+                    if tan is None:
+                        continue
+                    arms.append((pid, (int(rr), int(cc)),
+                                 (int(br), int(bc)), tan))
+
+        if len(arms) < 2:
+            continue
+        if len(arms) == 3:
+            pass
+        elif len(arms) == 4 and handle_x:
+            pass
+        else:
+            continue
+
+        pairs = []
+        for i in range(len(arms)):
+            for j in range(i + 1, len(arms)):
+                cos = (arms[i][3][0] * arms[j][3][0]
+                       + arms[i][3][1] * arms[j][3][1])
+                pairs.append((cos, i, j))
+        pairs.sort()
+
+        used = set()
+        merged_here = False
+        for cos, i, j in pairs:
+            if i in used or j in used:
+                continue
+            if cos > collinear_cos_thr:
+                break
+            union(arms[i][0], arms[j][0])
+            used.add(i)
+            used.add(j)
+            merged_here = True
+
+        if merged_here:
+            rep_pid = arms[next(iter(used))][0]
+            # Add the entire junction blob to the merged piece's label so its
+            # connected component physically spans both merged arms. Without
+            # this bridge the merged piece's pixel set splits into two CCs and
+            # order_piece would walk only the diameter of one half.
+            for br, bc in blob_pixels:
+                through_junc[(int(br), int(bc))] = rep_pid
+
+    new_labels = np.zeros_like(labels)
+    root_to_new: dict[int, int] = {}
+    for pid in range(1, n_lab):
+        mask = (labels == pid)
+        if not mask.any():
+            continue
+        root = find(pid)
+        nl = root_to_new.get(root)
+        if nl is None:
+            nl = len(root_to_new) + 1
+            root_to_new[root] = nl
+        new_labels[mask] = nl
+
+    through_pts = set()
+    for (jr, jc), pid in through_junc.items():
+        nl = root_to_new.get(find(pid))
+        if nl is None:
+            continue
+        new_labels[jr, jc] = nl
+        through_pts.add((jr, jc))
+
+    return new_labels, through_pts
+
+
 def _bfs_farthest(start: Tuple[int, int],
                   piece_mask: np.ndarray):
     """BFS within an 8-connected piece. Returns (last_visited, parent_map)."""
@@ -356,16 +545,38 @@ def decompose(mask_bool: np.ndarray, cfg: dict):
     # 3) connected components of pieces
     n_lab, labels = cv2.connectedComponents(pieces_bool.astype(np.uint8), connectivity=8)
 
+    # 3b) smart merge collinear arms at 3-arm junctions (conservative).
+    # Use the dilated junction mask the splitter actually carved out so the
+    # neighbor walk crosses the gap between junction blob and adjacent pieces.
+    smart_merge = bool(cfg.get("SMART_JUNCTION_MERGE", True))
+    through_junc_pts: set = set()
+    n_smart_merges = 0
+    if smart_merge and n_lab > 1:
+        n_lab_before = n_lab
+        junctions_for_merge = junc_dil & skel
+        labels, through_junc_pts = smart_merge_collinear_at_junctions(
+            labels, junctions_for_merge, n_lab,
+            walk_steps=int(cfg.get("SMART_JUNCTION_WALK_STEPS", 15)),
+            collinear_cos_thr=float(cfg.get("SMART_JUNCTION_COS_THR", -0.95)),
+            min_arm_len_px=int(cfg.get("SMART_JUNCTION_MIN_ARM_PX", 15)),
+            handle_x=bool(cfg.get("SMART_JUNCTION_HANDLE_X", True)),
+        )
+        n_lab = int(labels.max()) + 1
+        n_smart_merges = max(0, (n_lab_before - 1) - (n_lab - 1))
+
     # per-bin skeleton-pixel masks
     bin_skel = [np.zeros((H, W), dtype=bool) for _ in range(n_bins)]
 
     min_piece_len = int(cfg["MIN_PIECE_LEN"])
     binning_mode = str(cfg.get("BINNING_MODE", "hybrid"))
     hybrid_len = int(cfg.get("HYBRID_LEN_PX", 20))
+    adapt_max_span = int(cfg.get("ADAPTIVE_BIN_MAX_SPAN", 2))
+    adapt_min_frac = float(cfg.get("ADAPTIVE_BIN_MIN_FRAC", 0.1))
     n_kept = 0
     n_skipped_short = 0
     n_per_piece = 0
     n_per_pixel = 0
+    n_adaptive_unified = 0
 
     for lab in range(1, n_lab):
         comp = (labels == lab)
@@ -403,17 +614,45 @@ def decompose(mask_bool: np.ndarray, cfg: dict):
             n_per_pixel += 1
             tans = smooth_tangents(path, tw)
             bidx = bin_from_tangent(tans, step, n_bins)
-            for bi in range(n_bins):
-                sel = (bidx == bi)
-                if not np.any(sel):
-                    continue
-                pts = path[sel]
-                bin_skel[bi][pts[:, 0], pts[:, 1]] = True
 
-    # 4) Re-attach junction regions to every bin that touches them. Propagate
-    # through the full removed neighborhood so JUNCTION_DILATE_PX > 0 does not
-    # leave the interior orphaned.
+            unified = False
+            if len(bidx) > 0 and adapt_max_span >= 1:
+                bin_counts = np.bincount(bidx, minlength=n_bins)
+                dominant = int(bin_counts.argmax())
+                if bin_counts[dominant] > 0:
+                    thr_count = max(1, int(adapt_min_frac * bin_counts[dominant]))
+                    sig = np.where(bin_counts >= thr_count)[0]
+                    if len(sig) <= adapt_max_span:
+                        if len(sig) == 1:
+                            is_tight = True
+                        else:
+                            sig_sorted = np.sort(sig)
+                            diffs = np.diff(sig_sorted)
+                            wrap_gap = (sig_sorted[0] + n_bins) - sig_sorted[-1]
+                            max_gap = int(max(diffs.max(), wrap_gap))
+                            is_tight = (n_bins - max_gap) <= adapt_max_span
+                        if is_tight:
+                            bin_skel[dominant][path[:, 0], path[:, 1]] = True
+                            unified = True
+                            n_adaptive_unified += 1
+
+            if not unified:
+                for bi in range(n_bins):
+                    sel = (bidx == bi)
+                    if not np.any(sel):
+                        continue
+                    pts = path[sel]
+                    bin_skel[bi][pts[:, 0], pts[:, 1]] = True
+
+    # 4) Re-attach junction regions to every bin that touches them. Pixels in
+    # through_junc_pts already participated in piece labelling via the smart
+    # merge, so they must be skipped here to avoid handing the merged through-
+    # piece's pixels out to every adjacent bin.
     junction_region = junc_dil & skel
+    if through_junc_pts:
+        for jr, jc in through_junc_pts:
+            if 0 <= jr < H and 0 <= jc < W:
+                junction_region[jr, jc] = False
     if junction_region.any():
         grow_kernel = np.ones((3, 3), np.uint8)
         for bi in range(n_bins):
@@ -454,6 +693,12 @@ def decompose(mask_bool: np.ndarray, cfg: dict):
         "n_pieces_per_piece_binned": n_per_piece,
         "n_pieces_per_pixel_binned": n_per_pixel,
         "n_pieces_skipped_short": n_skipped_short,
+        "smart_junction_merge": bool(smart_merge),
+        "n_smart_junction_merges": int(n_smart_merges),
+        "n_through_junction_pixels": int(len(through_junc_pts)),
+        "n_adaptive_unified_pieces": int(n_adaptive_unified),
+        "adaptive_bin_max_span": int(adapt_max_span),
+        "adaptive_bin_min_frac": float(adapt_min_frac),
         "angle_bins": [[float(a), float(b)] for (a, b) in bins],
         "ANGLE_STEP_DEG": int(cfg["ANGLE_STEP_DEG"]),
     }
@@ -479,6 +724,26 @@ def parse_args() -> argparse.Namespace:
                     default=CONFIG["BINNING_MODE"])
     ap.add_argument("--hybrid-len-px", type=int, default=CONFIG["HYBRID_LEN_PX"])
     ap.add_argument("--spur-prune-px", type=int, default=CONFIG["SPUR_PRUNE_PX"])
+    ap.add_argument("--adaptive-bin-max-span", type=int,
+                    default=CONFIG["ADAPTIVE_BIN_MAX_SPAN"],
+                    help="Max number of cyclically-adjacent angle bins a piece "
+                         "may span before staying per-pixel. 0=disable adaptive unification.")
+    ap.add_argument("--adaptive-bin-min-frac", type=float,
+                    default=CONFIG["ADAPTIVE_BIN_MIN_FRAC"],
+                    help="Min pixel fraction (vs dominant bin) for a bin to count toward span.")
+    ap.add_argument("--smart-junction-merge", action=argparse.BooleanOptionalAction,
+                    default=CONFIG["SMART_JUNCTION_MERGE"],
+                    help="Fuse the two most-collinear arms of 3-arm junctions.")
+    ap.add_argument("--smart-junction-walk-steps", type=int,
+                    default=CONFIG["SMART_JUNCTION_WALK_STEPS"])
+    ap.add_argument("--smart-junction-cos-thr", type=float,
+                    default=CONFIG["SMART_JUNCTION_COS_THR"],
+                    help="Cosine threshold for collinear-arm pairing (more negative = stricter).")
+    ap.add_argument("--smart-junction-min-arm-px", type=int,
+                    default=CONFIG["SMART_JUNCTION_MIN_ARM_PX"])
+    ap.add_argument("--smart-junction-handle-x", action=argparse.BooleanOptionalAction,
+                    default=CONFIG["SMART_JUNCTION_HANDLE_X"],
+                    help="Merge through-pairs at 4-arm X-crossings too.")
     # passthrough args from the pipeline (ignored: kept for CLI compat)
     ap.add_argument("--tile-size", type=int, default=None,
                     help="Ignored (skeleton method is tile-free). Accepted for CLI compatibility.")
@@ -504,6 +769,13 @@ def main() -> None:
     cfg["BINNING_MODE"] = str(args.binning_mode)
     cfg["HYBRID_LEN_PX"] = int(args.hybrid_len_px)
     cfg["SPUR_PRUNE_PX"] = int(args.spur_prune_px)
+    cfg["ADAPTIVE_BIN_MAX_SPAN"] = int(args.adaptive_bin_max_span)
+    cfg["ADAPTIVE_BIN_MIN_FRAC"] = float(args.adaptive_bin_min_frac)
+    cfg["SMART_JUNCTION_MERGE"] = bool(args.smart_junction_merge)
+    cfg["SMART_JUNCTION_WALK_STEPS"] = int(args.smart_junction_walk_steps)
+    cfg["SMART_JUNCTION_COS_THR"] = float(args.smart_junction_cos_thr)
+    cfg["SMART_JUNCTION_MIN_ARM_PX"] = int(args.smart_junction_min_arm_px)
+    cfg["SMART_JUNCTION_HANDLE_X"] = bool(args.smart_junction_handle_x)
 
     out_dir = Path(args.output_root) / args.output_folder_name
     branches_dir = out_dir / "branches"
@@ -558,6 +830,13 @@ def main() -> None:
             "BINNING_MODE": cfg["BINNING_MODE"],
             "HYBRID_LEN_PX": cfg["HYBRID_LEN_PX"],
             "SPUR_PRUNE_PX": cfg["SPUR_PRUNE_PX"],
+            "ADAPTIVE_BIN_MAX_SPAN": cfg["ADAPTIVE_BIN_MAX_SPAN"],
+            "ADAPTIVE_BIN_MIN_FRAC": cfg["ADAPTIVE_BIN_MIN_FRAC"],
+            "SMART_JUNCTION_MERGE": cfg["SMART_JUNCTION_MERGE"],
+            "SMART_JUNCTION_WALK_STEPS": cfg["SMART_JUNCTION_WALK_STEPS"],
+            "SMART_JUNCTION_COS_THR": cfg["SMART_JUNCTION_COS_THR"],
+            "SMART_JUNCTION_MIN_ARM_PX": cfg["SMART_JUNCTION_MIN_ARM_PX"],
+            "SMART_JUNCTION_HANDLE_X": cfg["SMART_JUNCTION_HANDLE_X"],
             "WIDTH_PERCENTILE": cfg["WIDTH_PERCENTILE"],
         },
         "angle_bins": [[float(a), float(b)] for (a, b) in bins],
