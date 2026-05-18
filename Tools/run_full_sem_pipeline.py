@@ -84,6 +84,12 @@ DEFAULT_THICKEN_PX         = 8    # px to thicken each final bundle centerline
 DEFAULT_SMOOTH_WINDOW      = 8    # moving-window size for centerline smoothing
 DEFAULT_MIN_KEEP_LEN       = 20   # drop bundles whose skeleton is shorter than this (px)
 DEFAULT_OVERLAY_ALPHA      = 0.72 # overlay blend (0 = background only, 1 = labels only)
+DEFAULT_SMART_WIDTH        = True # SEM-guided rendered width also feeds postprocess cleanup
+DEFAULT_SMART_WIDTH_SEARCH_PX = 16
+DEFAULT_SMART_WIDTH_MIN_PX = 3
+DEFAULT_SMART_WIDTH_MAX_PX = 24
+DEFAULT_SMART_WIDTH_MIN_EDGE_GRAD = 4.0
+DEFAULT_SMART_WIDTH_MAX_SAMPLES = 200
 DEFAULT_OVERLAP_ABSORB_THR = 0.6  # postprocess overlap: absorb near-duplicate IDs into the larger
 DEFAULT_OCCLUSION_TRIM_THR = 0.25 # postprocess overlap: trim lower-priority layers hidden by earlier layers
 DEFAULT_OCCLUSION_TRIM_MIN_PX = 50 # hidden rendered pixels required before occlusion trim triggers
@@ -139,6 +145,18 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--smooth-window",   type=int,   default=DEFAULT_SMOOTH_WINDOW)
     ap.add_argument("--min-keep-len",    type=int,   default=DEFAULT_MIN_KEEP_LEN)
     ap.add_argument("--overlay-alpha",   type=float, default=DEFAULT_OVERLAY_ALPHA)
+    ap.add_argument("--smart-width", action=argparse.BooleanOptionalAction, default=DEFAULT_SMART_WIDTH,
+                    help="Postprocess: use SEM-guided edge sampling for rendered bundle width.")
+    ap.add_argument("--smart-width-search-px", type=int, default=DEFAULT_SMART_WIDTH_SEARCH_PX,
+                    help="Postprocess: normal-ray SEM edge search radius.")
+    ap.add_argument("--smart-width-min-px", type=int, default=DEFAULT_SMART_WIDTH_MIN_PX,
+                    help="Postprocess: minimum accepted SEM-guided rendered width.")
+    ap.add_argument("--smart-width-max-px", type=int, default=DEFAULT_SMART_WIDTH_MAX_PX,
+                    help="Postprocess: maximum accepted SEM-guided rendered width.")
+    ap.add_argument("--smart-width-min-edge-grad", type=float, default=DEFAULT_SMART_WIDTH_MIN_EDGE_GRAD,
+                    help="Postprocess: minimum edge gradient required on each side.")
+    ap.add_argument("--smart-width-max-samples", type=int, default=DEFAULT_SMART_WIDTH_MAX_SAMPLES,
+                    help="Postprocess: maximum cross-sections sampled per component.")
     ap.add_argument("--overlap-absorb-thr", type=float, default=DEFAULT_OVERLAP_ABSORB_THR,
                     help="Postprocess: absorb near-duplicate IDs whose intersection covers >= this "
                          "fraction of the smaller. 0 disables. Try 0.6-0.7.")
@@ -413,6 +431,12 @@ def main() -> None:
         "--smooth-window",              str(args.smooth_window),
         "--min-keep-len",               str(args.min_keep_len),
         "--overlay-alpha",              str(args.overlay_alpha),
+        *(["--smart-width"] if args.smart_width else ["--no-smart-width"]),
+        "--smart-width-search-px",      str(args.smart_width_search_px),
+        "--smart-width-min-px",         str(args.smart_width_min_px),
+        "--smart-width-max-px",         str(args.smart_width_max_px),
+        "--smart-width-min-edge-grad",  str(args.smart_width_min_edge_grad),
+        "--smart-width-max-samples",    str(args.smart_width_max_samples),
         "--overlap-absorb-thr",         str(args.overlap_absorb_thr),
         "--occlusion-trim-thr",         str(args.occlusion_trim_thr),
         "--occlusion-trim-min-px",      str(args.occlusion_trim_min_px),

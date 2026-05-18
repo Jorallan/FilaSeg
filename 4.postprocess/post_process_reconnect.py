@@ -27,6 +27,12 @@ DEFAULT_THICKEN_PX              = 3    # px to thicken each final bundle centerl
 DEFAULT_SMOOTH_WINDOW           = 7    # moving-window size for centerline smoothing
 DEFAULT_MIN_KEEP_LEN            = 10   # drop bundles whose skeleton is shorter than this (px)
 DEFAULT_OVERLAY_ALPHA           = 0.72 # blend weight for the coloured overlay (0 = background only, 1 = labels only)
+DEFAULT_SMART_WIDTH             = True # SEM-estimated rendered width also drives cleanup
+DEFAULT_SMART_WIDTH_SEARCH_PX   = 16   # normal-ray search radius for SEM edge detection
+DEFAULT_SMART_WIDTH_MIN_PX      = 3    # accepted rendered width lower bound
+DEFAULT_SMART_WIDTH_MAX_PX      = 24   # accepted rendered width upper bound
+DEFAULT_SMART_WIDTH_MIN_EDGE_GRAD = 4.0 # reject weak normal-profile edge responses
+DEFAULT_SMART_WIDTH_MAX_SAMPLES = 200  # sampled path cross-sections per component
 # ── Overlap absorb / endpoint trim (after thickening) ─────────────────────
 DEFAULT_OVERLAP_ABSORB_THR      = 0.0   # 0 = disabled. >=0.5 absorbs near-duplicate IDs into the larger.
 DEFAULT_OCCLUSION_TRIM_THR      = 0.0   # 0 = disabled. Trim lower-priority layers mostly hidden by earlier ones.
@@ -57,6 +63,18 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--smooth-window", type=int, default=DEFAULT_SMOOTH_WINDOW)
     ap.add_argument("--min-keep-len", type=int, default=DEFAULT_MIN_KEEP_LEN)
     ap.add_argument("--overlay-alpha", type=float, default=DEFAULT_OVERLAY_ALPHA)
+    ap.add_argument("--smart-width", action=argparse.BooleanOptionalAction, default=DEFAULT_SMART_WIDTH,
+                    help="Use SEM-guided edge detection for final rendered bundle widths.")
+    ap.add_argument("--smart-width-search-px", type=int, default=DEFAULT_SMART_WIDTH_SEARCH_PX,
+                    help="Normal-ray search radius used for SEM-guided edge detection.")
+    ap.add_argument("--smart-width-min-px", type=int, default=DEFAULT_SMART_WIDTH_MIN_PX,
+                    help="Smallest accepted SEM-guided rendered width.")
+    ap.add_argument("--smart-width-max-px", type=int, default=DEFAULT_SMART_WIDTH_MAX_PX,
+                    help="Largest accepted SEM-guided rendered width.")
+    ap.add_argument("--smart-width-min-edge-grad", type=float, default=DEFAULT_SMART_WIDTH_MIN_EDGE_GRAD,
+                    help="Minimum per-side SEM edge gradient required for a width sample.")
+    ap.add_argument("--smart-width-max-samples", type=int, default=DEFAULT_SMART_WIDTH_MAX_SAMPLES,
+                    help="Maximum cross-sections sampled per rendered component.")
     ap.add_argument("--overlap-absorb-thr", type=float, default=DEFAULT_OVERLAP_ABSORB_THR,
                     help="Pairs whose intersection covers >= this fraction of the smaller mask are merged "
                          "into the larger. 0 disables. Try 0.6-0.7.")
@@ -88,6 +106,15 @@ def read_rgb(path: Path, shape: tuple[int, int]) -> np.ndarray:
     if img.shape[:2] != shape:
         raise ValueError(f"Background shape {img.shape[:2]} does not match labels {shape}")
     return np.clip(img * 255.0, 0, 255).astype(np.uint8)
+
+
+def read_gray(path: Path, shape: tuple[int, int]) -> np.ndarray:
+    img = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
+    if img is None:
+        raise FileNotFoundError(f"Could not read background image: {path}")
+    if img.shape != shape:
+        raise ValueError(f"Background shape {img.shape} does not match labels {shape}")
+    return img.astype(np.float32)
 
 
 def load_layered_components(path: Path, shape: tuple[int, int]) -> list[tuple[int, np.ndarray]]:
@@ -231,6 +258,146 @@ def render_path(label_img: np.ndarray, path: np.ndarray, label_id: int, thicknes
         cv2.polylines(label_img, [pts.reshape(-1, 1, 2)], False, int(label_id), int(thickness), cv2.LINE_8)
 
 
+def _sample_indices(n: int, max_samples: int) -> np.ndarray:
+    if n <= 0:
+        return np.zeros(0, dtype=np.int32)
+    edge_skip = min(max(2, n // 20), max(0, (n - 1) // 2))
+    start = edge_skip
+    stop = max(start, n - 1 - edge_skip)
+    count = max(1, min(int(max_samples), stop - start + 1))
+    return np.unique(np.linspace(start, stop, count).round().astype(np.int32))
+
+
+def estimate_sem_guided_width(
+    path: np.ndarray,
+    sem_gray: np.ndarray,
+    *,
+    fallback_width: int,
+    search_px: int,
+    min_width_px: int,
+    max_width_px: int,
+    min_edge_grad: float,
+    max_samples: int,
+) -> dict:
+    """Estimate one component width from SEM gradients sampled normal to its path."""
+    search = max(2, int(search_px))
+    min_width = max(1, int(min_width_px))
+    max_width = max(min_width, int(max_width_px))
+    fallback = int(np.clip(int(fallback_width), min_width, max_width))
+
+    def result(width_px: int, *, used_fallback: bool, n_samples: int, widths: np.ndarray | None = None) -> dict:
+        if widths is None or len(widths) == 0:
+            return {
+                "width_px": int(width_px),
+                "used_fallback": used_fallback,
+                "n_samples": int(n_samples),
+                "n_valid_samples": 0,
+                "median_width_px": None,
+            }
+        median_width = float(np.median(widths))
+        return {
+            "width_px": int(width_px),
+            "used_fallback": used_fallback,
+            "n_samples": int(n_samples),
+            "n_valid_samples": int(len(widths)),
+            "median_width_px": round(median_width, 3),
+            "p10_width_px": round(float(np.percentile(widths, 10)), 3),
+            "p90_width_px": round(float(np.percentile(widths, 90)), 3),
+        }
+
+    if len(path) < 3:
+        return result(fallback, used_fallback=True, n_samples=0)
+
+    indices = _sample_indices(len(path), max_samples)
+    if len(indices) == 0:
+        return result(fallback, used_fallback=True, n_samples=0)
+
+    tangents = []
+    centers = []
+    for idx in indices:
+        lo = max(0, int(idx) - 3)
+        hi = min(len(path) - 1, int(idx) + 3)
+        delta = path[hi].astype(np.float32) - path[lo].astype(np.float32)
+        norm = float(np.hypot(delta[0], delta[1]))
+        if norm < 1e-6:
+            continue
+        tangents.append(delta / norm)
+        centers.append(path[int(idx)].astype(np.float32))
+    if not centers:
+        return result(fallback, used_fallback=True, n_samples=len(indices))
+
+    centers_arr = np.asarray(centers, dtype=np.float32)
+    tangents_arr = np.asarray(tangents, dtype=np.float32)
+    normals = np.stack([-tangents_arr[:, 1], tangents_arr[:, 0]], axis=1)
+    offsets = np.arange(-search, search + 1, dtype=np.float32)
+    sample_r = centers_arr[:, 0:1] + normals[:, 0:1] * offsets[None, :]
+    sample_c = centers_arr[:, 1:2] + normals[:, 1:2] * offsets[None, :]
+    profiles = cv2.remap(
+        sem_gray,
+        sample_c.astype(np.float32),
+        sample_r.astype(np.float32),
+        interpolation=cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_REFLECT_101,
+    )
+    profiles = cv2.GaussianBlur(profiles.astype(np.float32), (5, 1), 0)
+    signed_grads = np.diff(profiles, axis=1)
+
+    center = search
+    min_radius = max(1, int(np.floor(min_width / 2)))
+    max_radius = min(search - 1, max(1, int(np.ceil(max_width / 2))))
+    if max_radius < min_radius:
+        return result(fallback, used_fallback=True, n_samples=len(indices))
+
+    left_signed_slice = signed_grads[:, center - max_radius:center - min_radius + 1]
+    right_signed_slice = signed_grads[:, center + min_radius - 1:center + max_radius]
+    left_slice = np.abs(left_signed_slice)
+    right_slice = np.abs(right_signed_slice)
+    if left_slice.size == 0 or right_slice.size == 0:
+        return result(fallback, used_fallback=True, n_samples=len(indices))
+
+    def best_signed_edge(strength: np.ndarray, signed: np.ndarray, positive: bool) -> tuple[np.ndarray, np.ndarray]:
+        allowed = signed > 0 if positive else signed < 0
+        masked = np.where(allowed, strength, -1.0)
+        argmax = np.argmax(masked, axis=1)
+        return argmax, masked[np.arange(len(masked)), argmax]
+
+    # A real bright or dark bundle should enter on one edge and exit on the
+    # other, so choose the stronger opposite-slope edge pair on each slice.
+    lp_idx, lp_grad = best_signed_edge(left_slice, left_signed_slice, True)
+    ln_idx, ln_grad = best_signed_edge(left_slice, left_signed_slice, False)
+    rp_idx, rp_grad = best_signed_edge(right_slice, right_signed_slice, True)
+    rn_idx, rn_grad = best_signed_edge(right_slice, right_signed_slice, False)
+    use_pos_then_neg = (lp_grad + rn_grad) >= (ln_grad + rp_grad)
+    left_argmax = np.where(use_pos_then_neg, lp_idx, ln_idx)
+    right_argmax = np.where(use_pos_then_neg, rn_idx, rp_idx)
+    left_grad = np.where(use_pos_then_neg, lp_grad, ln_grad)
+    right_grad = np.where(use_pos_then_neg, rn_grad, rp_grad)
+    left_radius = max_radius - left_argmax
+    right_radius = min_radius + right_argmax
+    widths = left_radius + right_radius
+    valid = (
+        (left_grad >= float(min_edge_grad))
+        & (right_grad >= float(min_edge_grad))
+        & (widths >= min_width)
+        & (widths <= max_width)
+    )
+    valid_widths = widths[valid].astype(np.float32)
+    min_valid = max(5, int(np.ceil(len(widths) * 0.15)))
+    if len(valid_widths) < min_valid:
+        return result(fallback, used_fallback=True, n_samples=len(widths))
+
+    q1, q3 = np.percentile(valid_widths, [25, 75])
+    iqr = float(q3 - q1)
+    if iqr > 0:
+        lo = q1 - 1.5 * iqr
+        hi = q3 + 1.5 * iqr
+        trimmed = valid_widths[(valid_widths >= lo) & (valid_widths <= hi)]
+        if len(trimmed) >= min_valid:
+            valid_widths = trimmed
+    median_width = float(np.median(valid_widths))
+    width_px = int(np.clip(int(round(median_width)), min_width, max_width))
+    return result(width_px, used_fallback=False, n_samples=len(widths), widths=valid_widths)
+
 
 def pieces_from_labels(lbl: np.ndarray) -> list[Piece]:
     pieces: list[Piece] = []
@@ -280,9 +447,9 @@ def absorb_overlapping_layers(
 ) -> tuple[list[tuple[int, np.ndarray]], list[tuple[int, int, float]]]:
     """Merge pairs whose intersection covers >= thr of the smaller mask.
 
-    Operates on rendered (thickened) per-piece masks, where duplicate-bundle
-    overlap actually appears -- reconnect's component-level overlap-kill cannot
-    see this because it runs before postprocess thickening.
+    Operates on rendered per-piece masks, where duplicate-bundle overlap
+    actually appears -- reconnect's component-level overlap-kill cannot see
+    this because it runs before postprocess rendering.
     """
     if thr <= 0 or len(layers) < 2:
         return layers, []
@@ -422,19 +589,48 @@ def main() -> None:
     drop_short_pieces(pieces, args.min_keep_len)
 
     out = np.zeros(lbl.shape, dtype=np.uint16)
+    sem_gray = read_gray(args.background, out.shape) if args.smart_width and args.background.exists() else None
     layered_out: list[tuple[int, np.ndarray]] = []
+    smart_width_log: list[dict] = []
     kept = [p for p in pieces if not p.dropped and p.skel_len >= args.min_keep_len]
     kept.sort(key=lambda p: (-p.skel_len, -p.area, p.new_id))
     for out_id, p in enumerate(kept, start=1):
         tmp = np.zeros_like(out)
-        for submask in [p.mask]:
-            path = smooth_path(dominant_path(submask), args.smooth_window)
-            render_path(tmp, path, out_id, args.thicken_px)
+        path = smooth_path(dominant_path(p.mask), args.smooth_window)
+        if args.smart_width and sem_gray is not None:
+            width_info = estimate_sem_guided_width(
+                path,
+                sem_gray,
+                fallback_width=int(args.thicken_px),
+                search_px=int(args.smart_width_search_px),
+                min_width_px=int(args.smart_width_min_px),
+                max_width_px=int(args.smart_width_max_px),
+                min_edge_grad=float(args.smart_width_min_edge_grad),
+                max_samples=int(args.smart_width_max_samples),
+            )
+        else:
+            width_info = {
+                "width_px": int(args.thicken_px),
+                "used_fallback": True,
+                "n_samples": 0,
+                "n_valid_samples": 0,
+                "median_width_px": None,
+            }
+        render_path(tmp, path, out_id, int(width_info["width_px"]))
         layer = tmp > 0
         if np.any(layer):
             layered_out.append((out_id, layer.copy()))
+        smart_width_log.append(
+            {
+                "id": int(out_id),
+                "source_area_px": int(p.mask.sum()),
+                **width_info,
+                "rendered_area_px": int(layer.sum()),
+            }
+        )
 
-    # Optional cleanup passes operating on the rendered (thickened) layers.
+    # Cleanup passes run on the rendered layers. When smart width is enabled,
+    # its SEM-guided masks intentionally affect absorb and occlusion decisions.
     overlap_absorb_log: list[tuple[int, int, float]] = []
     if args.overlap_absorb_thr > 0:
         layered_out, overlap_absorb_log = absorb_overlapping_layers(
@@ -478,6 +674,13 @@ def main() -> None:
         "max_label_id": int(out.max()),
         "dropped_pieces": int(sum(p.dropped for p in pieces)),
         "thicken_px": int(args.thicken_px),
+        "render_width_mode": "sem_edge" if args.smart_width and sem_gray is not None else "fixed",
+        "smart_width_enabled": bool(args.smart_width),
+        "smart_width_search_px": int(args.smart_width_search_px),
+        "smart_width_min_px": int(args.smart_width_min_px),
+        "smart_width_max_px": int(args.smart_width_max_px),
+        "smart_width_min_edge_grad": float(args.smart_width_min_edge_grad),
+        "smart_width_estimates": smart_width_log,
         "smooth_window": int(args.smooth_window),
         "overlap_absorb_thr": float(args.overlap_absorb_thr),
         "overlap_absorbed_pairs": [
