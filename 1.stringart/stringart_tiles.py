@@ -164,6 +164,11 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--tile-grid-vote-min", type=int, default=None,
                     help="Min number of grids a pixel must appear in to be kept. "
                          "1 = OR (any grid). 2+ = strict (rejects single-grid noise).")
+    # Auto-scale multipliers: bias the width-adaptive Hough values (1.0 = none).
+    ap.add_argument("--auto-scale-hough-threshold-mult", type=float, default=None)
+    ap.add_argument("--auto-scale-hough-maxgap-mult", type=float, default=None)
+    ap.add_argument("--auto-scale-hough-minlen-mult", type=float, default=None)
+    ap.add_argument("--auto-scale-newpix-mult", type=float, default=None)
     return ap.parse_args()
 
 
@@ -185,6 +190,10 @@ def apply_cli_overrides(args: argparse.Namespace) -> None:
         "residual_dilate_iters": "RESIDUAL_DILATE_ITERS",
         "use_skeletonize": "USE_SKELETONIZE",
         "auto_scale": "AUTO_SCALE_PARAMS",
+        "auto_scale_hough_threshold_mult": "AUTO_SCALE_HOUGH_THRESHOLD_MULT",
+        "auto_scale_hough_maxgap_mult": "AUTO_SCALE_HOUGH_MAXGAP_MULT",
+        "auto_scale_hough_minlen_mult": "AUTO_SCALE_HOUGH_MINLEN_MULT",
+        "auto_scale_newpix_mult": "AUTO_SCALE_MIN_ACCEPT_NEWPIX_MULT",
     }
     for arg_name, cfg_name in mapping.items():
         val = getattr(args, arg_name)

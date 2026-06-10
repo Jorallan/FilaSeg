@@ -91,7 +91,7 @@ DEFAULT_SMART_WIDTH_MAX_PX = 24
 DEFAULT_SMART_WIDTH_MIN_EDGE_GRAD = 4.0
 DEFAULT_SMART_WIDTH_MAX_SAMPLES = 200
 DEFAULT_OVERLAP_ABSORB_THR = 0.6  # postprocess overlap: absorb near-duplicate IDs into the larger
-DEFAULT_OCCLUSION_TRIM_THR = 0.25 # postprocess overlap: trim lower-priority layers hidden by earlier layers
+DEFAULT_OCCLUSION_TRIM_THR = 0.4  # tuned 2026-06-08: 0.25->0.4 gave real F1 0.709->0.720, synthetic neutral (cross-validated)
 DEFAULT_OCCLUSION_TRIM_MIN_PX = 50 # hidden rendered pixels required before occlusion trim triggers
 
 # ── DEM JSON ──────────────────────────────────────────────────────────────
@@ -184,6 +184,20 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--skeleton-decompose", action=argparse.BooleanOptionalAction,
                     default=DEFAULT_SKELETON_DECOMPOSE,
                     help="Use experimental/WIP skeleton_decompose.py instead of stringart_tiles.py for stage 1.")
+    # Stringart (tiled-Hough) internal knobs — forwarded to stringart_tiles only
+    # in the tiled path. Default None = stringart's own auto-scale picks them.
+    ap.add_argument("--hough-threshold", type=int, default=None)
+    ap.add_argument("--hough-min-line-length", type=int, default=None)
+    ap.add_argument("--hough-max-line-gap", type=int, default=None)
+    ap.add_argument("--min-accept-newpix", type=int, default=None)
+    ap.add_argument("--min-accept-density", type=float, default=None)
+    ap.add_argument("--stringart-no-auto-scale", action="store_true",
+                    help="Disable stringart width auto-scale (use the explicit Hough values above).")
+    # Auto-scale multipliers (bias the width-adaptive Hough values; 1.0 = none).
+    ap.add_argument("--hough-threshold-mult", type=float, default=None)
+    ap.add_argument("--hough-maxgap-mult", type=float, default=None)
+    ap.add_argument("--hough-minlen-mult", type=float, default=None)
+    ap.add_argument("--newpix-mult", type=float, default=None)
     return ap.parse_args()
 
 
@@ -387,6 +401,21 @@ def main() -> None:
     reconnect_cfg.write_text(_yaml.dump(_cfg, default_flow_style=False, sort_keys=False), encoding="utf-8")
 
     stage1_script = "skeleton_decompose.py" if args.skeleton_decompose else "stringart_tiles.py"
+    stage1_extra = []
+    if not args.skeleton_decompose:   # tiled-Hough internal knobs (optional)
+        if args.stringart_no_auto_scale:
+            stage1_extra += ["--no-auto-scale"]
+        for _flag, _val in (("--hough-threshold", args.hough_threshold),
+                            ("--hough-min-line-length", args.hough_min_line_length),
+                            ("--hough-max-line-gap", args.hough_max_line_gap),
+                            ("--min-accept-newpix", args.min_accept_newpix),
+                            ("--min-accept-density", args.min_accept_density),
+                            ("--auto-scale-hough-threshold-mult", args.hough_threshold_mult),
+                            ("--auto-scale-hough-maxgap-mult", args.hough_maxgap_mult),
+                            ("--auto-scale-hough-minlen-mult", args.hough_minlen_mult),
+                            ("--auto-scale-newpix-mult", args.newpix_mult)):
+            if _val is not None:
+                stage1_extra += [_flag, str(_val)]
     run([
         args.python, ROOT / "1.stringart" / stage1_script,
         "--input", args.mask,
@@ -396,6 +425,7 @@ def main() -> None:
         "--angle-step-deg", str(args.angle_step_deg),
         *(["--tile-grid-offsets", args.tile_grid_offsets] if args.tile_grid_offsets else []),
         "--tile-grid-vote-min", str(args.tile_grid_vote_min),
+        *stage1_extra,
     ])
     run([
         args.python, ROOT / "2.preprocess" / "preprocess_stringart_branches.py",

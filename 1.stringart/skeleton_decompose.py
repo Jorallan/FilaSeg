@@ -60,7 +60,7 @@ CONFIG = {
     #                              (much cleaner branches; loses smooth-curve splitting)
     #               = "hybrid"    -> per_piece for short pieces, per_pixel for longer
     #                              pieces. Default.
-    "BINNING_MODE":       "hybrid",
+    "BINNING_MODE":       "hybrid",  # per_piece tested far worse (0.463 vs 0.592); kept hybrid
     "HYBRID_LEN_PX":      20,
 
     # tangent smoothing window (pixels along the path used to estimate direction)
@@ -74,7 +74,32 @@ CONFIG = {
     # spur pruning: remove skeleton tips whose path back to a junction is
     # shorter than this. 0 disables. Helps avoid spurious junctions caused by
     # bumpy mask edges.
-    "SPUR_PRUNE_PX":      3,
+    "SPUR_PRUNE_PX":      3,   # spur-prune=8 tested worse (0.566 vs 0.592); kept 3
+    # SANDBOX graph-rewrite step 1: morphologically close the mask before
+    # skeletonizing so jagged UNet edges don't spawn spurs / false junctions
+    # (the diagnosed cause of skeleton fragmentation on real masks). 0 disables.
+    "MASK_SMOOTH_CLOSE_PX": 1,
+    # SANDBOX: stage-1 gap bridging (Hough maxLineGap analog). Join collinear
+    # facing endpoints across gaps <= GAP_BRIDGE_PX before binning. 0 disables.
+    # naive 5px washed (mean +0.001; synth3 wrong bridge). Adding width-
+    # consistency + mutual-best (gap_bridge_pieces) makes it a WIN: mean
+    # 0.622->0.635 (best skeleton), real 0.573->0.632, 4/5 samples up. 12px
+    # over-merges (0.43). synth3 still -0.057 (a wrong bridge geometry can't
+    # catch -> SEM territory, eval/SEM_PLAN.md). Kept ON at 5px.
+    "GAP_BRIDGE_PX":         5.0,
+    "GAP_BRIDGE_COS_THR":    0.8,
+    "GAP_BRIDGE_MAX_WIDTH_RATIO": 1.6,   # reject bridges between very-different-width pieces
+    # line-residual gate tested NEUTRAL (0.635->0.634): synth3's wrong bridge is
+    # genuinely collinear, so geometry can't catch it -> SEM needed. Disabled.
+    "GAP_BRIDGE_MAX_RESID_PX":    999.0,
+    # SANDBOX graph-rewrite step 3: true skeleton-graph path tracing with
+    # width-aware junction resolution (replaces split + local smart-merge).
+    # Graph-trace (width-aware) tested WORSE than union-find smart_merge
+    # (real 0.52-0.53 vs 0.573, width on or off) -> junction pairing is not the
+    # bottleneck. Kept OFF; best skeleton = mask-smooth + smart_merge (0.622).
+    "GRAPH_TRACE":          False,
+    "GRAPH_MAX_WIDTH_RATIO": 2.0,
+    "GRAPH_WIDTH_WEIGHT":    0.3,
 
     # filament width estimation (same convention as stringart_tiles)
     "WIDTH_PERCENTILE":   60.0,
@@ -105,8 +130,8 @@ CONFIG = {
     # (X-crossings) where through-pair detection is ambiguous.
     "SMART_JUNCTION_MERGE":       True,
     "SMART_JUNCTION_WALK_STEPS":  10,
-    "SMART_JUNCTION_COS_THR":     -0.90,
-    "SMART_JUNCTION_MIN_ARM_PX":  25,
+    "SMART_JUNCTION_COS_THR":     -0.75,   # SANDBOX: was -0.90; fuse arms within ~45deg of anti-parallel
+    "SMART_JUNCTION_MIN_ARM_PX":  10,      # SANDBOX: was 25; let shorter through-arms fuse (reduce fragmentation)
     # Allow merging at X-crossings (4-arm junction blobs). When True, the
     # best collinear pair is merged greedily; the remaining two arms are then
     # considered as a second pair (they get merged separately if also collinear).
@@ -272,6 +297,7 @@ def _arm_tangent_from_junction(piece_mask: np.ndarray, junc_rc: Tuple[int, int],
     cur = entry_rc
     prev = junc_rc
     end = entry_rc
+    path = [entry_rc]
     for _ in range(int(walk_steps)):
         cr, cc = cur
         nbrs = []
@@ -290,6 +316,8 @@ def _arm_tangent_from_junction(piece_mask: np.ndarray, junc_rc: Tuple[int, int],
         visited.add(nxt)
         prev, cur = cur, nxt
         end = cur
+    # (PCA-over-arc tangent tested neutral-to-worse: 0.622->0.618; kept the
+    # simpler junction->endpoint chord. Pairing quality is not the bottleneck.)
     dr_v = float(end[0]) - float(junc_rc[0])
     dc_v = float(end[1]) - float(junc_rc[1])
     n = math.hypot(dr_v, dc_v)
@@ -367,11 +395,10 @@ def smart_merge_collinear_at_junctions(labels: np.ndarray,
 
         if len(arms) < 2:
             continue
-        if len(arms) == 3:
-            pass
-        elif len(arms) == 4 and handle_x:
-            pass
-        else:
+        # SANDBOX: generalized greedy anti-parallel pairing for ANY arm count
+        # (>=2). Previously only 3- and 4-arm blobs merged, leaving 2-arm blobs
+        # (a 3rd arm too short) and 5+-arm dense crossings fully fragmented.
+        if len(arms) >= 4 and not handle_x:
             continue
 
         pairs = []
@@ -517,6 +544,270 @@ def bin_from_tangent(tan_rc: np.ndarray, step_deg: float, n_bins: int) -> np.nda
 # Main decomposition
 # ============================================================
 
+def _edge_width(dt: np.ndarray, path: np.ndarray) -> float:
+    """Median width (2*DT radius) of the mask sampled along an ordered edge."""
+    if path.size == 0:
+        return 1.0
+    vals = dt[path[:, 0], path[:, 1]]
+    vals = vals[vals > 0]
+    return float(2.0 * np.median(vals)) if vals.size else 1.0
+
+
+def _end_tangent(path: np.ndarray, at_start: bool, walk: int):
+    """Unit tangent pointing INTO the edge from one end (away from its junction)."""
+    n = path.shape[0]
+    if n < 2:
+        return None
+    k = min(int(walk), n - 1)
+    v = (path[k] - path[0]) if at_start else (path[n - 1 - k] - path[n - 1])
+    nv = math.hypot(float(v[0]), float(v[1]))
+    return (float(v[0]) / nv, float(v[1]) / nv) if nv >= 1e-6 else None
+
+
+def decompose_graph(skel: np.ndarray, mask_bool: np.ndarray, cfg: dict):
+    """True skeleton-graph decomposition with width-aware junction resolution.
+
+    Nodes = junction blobs (>=3 nbrs) + endpoints; edges = degree-<=2 segments
+    between nodes. At each junction the incident arms are matched into through-
+    pairs by tangent anti-parallelism AND width similarity (a thin filament does
+    not continue into a thick one). Matched edges are unioned into filament paths
+    and the bridging junction pixels added so each path is one component.
+
+    Returns (labels, through_pts, junc_mask, n_merges).
+    """
+    H, W = skel.shape
+    walk = int(cfg.get("SMART_JUNCTION_WALK_STEPS", 10))
+    cos_thr = float(cfg.get("SMART_JUNCTION_COS_THR", -0.75))
+    max_wr = float(cfg.get("GRAPH_MAX_WIDTH_RATIO", 2.0))
+    w_weight = float(cfg.get("GRAPH_WIDTH_WEIGHT", 0.3))
+    handle_x = bool(cfg.get("SMART_JUNCTION_HANDLE_X", True))
+
+    nb = neighbor_count_8(skel)
+    junc = (nb >= 3) & skel
+    edge_skel = skel & ~junc
+    n_e, edge_lab = cv2.connectedComponents(edge_skel.astype(np.uint8), connectivity=8)
+    n_j, junc_lab = cv2.connectedComponents(junc.astype(np.uint8), connectivity=8)
+    dt = cv2.distanceTransform(mask_bool.astype(np.uint8), cv2.DIST_L2, 3)
+
+    def adjacent_junc(pix) -> int:
+        r, c = int(pix[0]), int(pix[1])
+        for dr in (-1, 0, 1):
+            for dc in (-1, 0, 1):
+                if dr == 0 and dc == 0:
+                    continue
+                rr, cc = r + dr, c + dc
+                if 0 <= rr < H and 0 <= cc < W and junc_lab[rr, cc] > 0:
+                    return int(junc_lab[rr, cc])
+        return 0
+
+    edge_path, edge_ends, edge_w = {}, {}, {}
+    for eid in range(1, n_e):
+        comp = (edge_lab == eid)
+        if not comp.any():
+            continue
+        path = order_piece(comp)
+        if path.shape[0] == 0:
+            continue
+        edge_path[eid] = path
+        edge_w[eid] = _edge_width(dt, path)
+        edge_ends[eid] = [
+            (adjacent_junc(path[0]), _end_tangent(path, True, walk)),
+            (adjacent_junc(path[-1]), _end_tangent(path, False, walk)),
+        ]
+
+    junc_arms: dict = {}
+    for eid, ends in edge_ends.items():
+        for (jb, tan) in ends:
+            if jb > 0 and tan is not None:
+                junc_arms.setdefault(jb, []).append((eid, tan, edge_w[eid]))
+
+    parent = {eid: eid for eid in edge_path}
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a, b):
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[ra] = rb
+
+    bridged: dict = {}
+    n_merges = 0
+    for jb, arms in junc_arms.items():
+        if len(arms) < 2 or (len(arms) >= 4 and not handle_x):
+            continue
+        cands = []
+        for i in range(len(arms)):
+            for j in range(i + 1, len(arms)):
+                ti, tj = arms[i][1], arms[j][1]
+                cos = ti[0] * tj[0] + ti[1] * tj[1]
+                if cos > cos_thr:
+                    continue
+                wi, wj = arms[i][2], arms[j][2]
+                wr = max(wi, wj) / max(1e-6, min(wi, wj))
+                if wr > max_wr:
+                    continue
+                cands.append((cos + w_weight * math.log(wr), i, j))
+        cands.sort()
+        used = set()
+        for _score, i, j in cands:
+            if i in used or j in used:
+                continue
+            union(arms[i][0], arms[j][0])
+            used.add(i); used.add(j)
+            bridged[jb] = arms[i][0]
+            n_merges += 1
+
+    labels = np.zeros((H, W), dtype=np.int32)
+    root_to_new: dict = {}
+    for eid in edge_path:
+        root = find(eid)
+        nl = root_to_new.get(root)
+        if nl is None:
+            nl = len(root_to_new) + 1
+            root_to_new[root] = nl
+        labels[edge_lab == eid] = nl
+
+    through_pts = set()
+    for jb, rep_eid in bridged.items():
+        nl = root_to_new.get(find(rep_eid))
+        if nl is None:
+            continue
+        for (jr, jc) in np.argwhere(junc_lab == jb):
+            labels[jr, jc] = nl
+            through_pts.add((int(jr), int(jc)))
+
+    return labels, through_pts, junc, n_merges
+
+
+def gap_bridge_pieces(labels: np.ndarray, dt: np.ndarray, gap_px: float,
+                      cos_thr: float, walk: int, max_wr: float = 1.6,
+                      max_resid: float = 2.0):
+    """Stage-1 gap bridging — smarter skeleton analog of Hough's maxLineGap.
+
+    Bridges collinear, facing endpoint pairs across small gaps BEFORE binning so
+    a gap-broken filament stays one piece in one bin. Two non-SEM rejections cut
+    the wrong bridges that washed out the naive version:
+      - width-consistency: a real filament continues at the same width
+        (reject pairs whose piece widths differ by > max_wr);
+      - MUTUAL-BEST: only bridge a pair when each tip is the OTHER's best
+        candidate (kills opportunistic one-sided joins).
+
+    Returns (labels, n_bridges).
+    """
+    if gap_px <= 0:
+        return labels, 0
+    ids = [int(v) for v in np.unique(labels) if v > 0]
+    if len(ids) < 2:
+        return labels, 0
+
+    # Each piece -> its two ordered ends + inward tangents + piece width.
+    tips = []  # (pid, end_rc, inward_tan, width)
+    for pid in ids:
+        comp = (labels == pid)
+        path = order_piece(comp)
+        if path.shape[0] < 2:
+            continue
+        w = _edge_width(dt, path)
+        k = min(int(walk), path.shape[0] - 1)
+        for at_start in (True, False):
+            end = path[0] if at_start else path[-1]
+            inn = (path[k] - path[0]) if at_start else (path[path.shape[0] - 1 - k] - path[-1])
+            ninn = math.hypot(float(inn[0]), float(inn[1]))
+            if ninn < 1e-6:
+                continue
+            tips.append((pid, np.asarray([float(end[0]), float(end[1])]),
+                         np.asarray([float(inn[0]) / ninn, float(inn[1]) / ninn]), w))
+
+    # Score every feasible pair; track each tip's best partner for mutual-best.
+    pair_score: dict = {}
+    best: dict = {}
+    for i in range(len(tips)):
+        for j in range(i + 1, len(tips)):
+            if tips[i][0] == tips[j][0]:
+                continue
+            ei, ej = tips[i][1], tips[j][1]
+            d = math.hypot(float(ei[0] - ej[0]), float(ei[1] - ej[1]))
+            if d < 1e-6 or d > gap_px:
+                continue
+            u = (ej - ei) / d
+            fwd_i = float((-tips[i][2]) @ u)        # i's tip faces j?
+            fwd_j = float((-tips[j][2]) @ (-u))     # j's tip faces i?
+            if fwd_i < cos_thr or fwd_j < cos_thr:
+                continue
+            if float(tips[i][2] @ tips[j][2]) > -cos_thr:   # inward anti-parallel?
+                continue
+            wi, wj = tips[i][3], tips[j][3]
+            wr = max(wi, wj) / max(1e-6, min(wi, wj))
+            if wr > max_wr:                          # width-consistency
+                continue
+            # collinearity: each tip must lie near the OTHER's extended tangent
+            # ray — rejects parallel-but-laterally-offset pieces (S-kink joins).
+            oi, oj = -tips[i][2], -tips[j][2]
+            dij = ej - ei
+            perp_i = float(np.linalg.norm(dij - float(dij @ oi) * oi))
+            perp_j = float(np.linalg.norm((-dij) - float((-dij) @ oj) * oj))
+            if 0.5 * (perp_i + perp_j) > max_resid:
+                continue
+            score = d - 0.5 * (fwd_i + fwd_j) * gap_px + 1.0 * math.log(wr)
+            pair_score[(i, j)] = score
+            if i not in best or score < best[i][0]:
+                best[i] = (score, j)
+            if j not in best or score < best[j][0]:
+                best[j] = (score, i)
+
+    # Keep only mutual-best pairs.
+    cands = sorted(
+        (s, i, j) for (i, j), s in pair_score.items()
+        if best.get(i, (0, -1))[1] == j and best.get(j, (0, -1))[1] == i
+    )
+
+    parent = {pid: pid for pid in ids}
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    used = set()
+    n_bridges = 0
+    for _s, i, j in cands:
+        if i in used or j in used:
+            continue
+        pi, pj = find(tips[i][0]), find(tips[j][0])
+        if pi == pj:
+            continue
+        # draw the bridge segment into labels (use pi's label)
+        r0, c0 = int(round(tips[i][1][0])), int(round(tips[i][1][1]))
+        r1, c1 = int(round(tips[j][1][0])), int(round(tips[j][1][1]))
+        rr = np.linspace(r0, r1, int(max(abs(r1 - r0), abs(c1 - c0)) + 1))
+        cc = np.linspace(c0, c1, int(max(abs(r1 - r0), abs(c1 - c0)) + 1))
+        rr = np.clip(np.round(rr).astype(int), 0, labels.shape[0] - 1)
+        cc = np.clip(np.round(cc).astype(int), 0, labels.shape[1] - 1)
+        labels[rr, cc] = pi
+        parent[pj] = pi
+        used.add(i); used.add(j)
+        n_bridges += 1
+
+    # relabel by union-find group
+    if n_bridges:
+        remap = {}
+        out = np.zeros_like(labels)
+        for pid in ids:
+            root = find(pid)
+            nl = remap.get(root)
+            if nl is None:
+                nl = len(remap) + 1
+                remap[root] = nl
+            out[labels == pid] = nl
+        labels = out
+    return labels, n_bridges
+
+
 def decompose(mask_bool: np.ndarray, cfg: dict):
     H, W = mask_bool.shape
     bins = angle_bins(cfg["ANGLE_STEP_DEG"])
@@ -531,38 +822,66 @@ def decompose(mask_bool: np.ndarray, cfg: dict):
     if tw <= 0:
         tw = max(12, int(round(5.0 * fw)))
 
-    # 1) skeletonize whole image
-    skel = skeletonize_full(mask_bool)
+    # 1) skeletonize whole image (optionally smooth jagged edges first so the
+    #    skeleton has fewer spurs / false junctions on real UNet masks)
+    close_px = int(cfg.get("MASK_SMOOTH_CLOSE_PX", 0))
+    mask_for_skel = mask_bool
+    if close_px > 0:
+        from scipy.ndimage import binary_closing as _bclose
+        mask_for_skel = _bclose(mask_bool, structure=np.ones((3, 3), dtype=bool),
+                                iterations=close_px)
+    skel = skeletonize_full(mask_for_skel)
 
     # 1b) optional spur pruning to suppress spurious junctions on bumpy edges
     spur_px = int(cfg.get("SPUR_PRUNE_PX", 0))
     if spur_px > 0:
         skel = prune_spurs(skel, spur_px)
 
-    # 2) split at junctions
-    pieces_bool, junc_dil = split_at_junctions(skel, int(cfg["JUNCTION_DILATE_PX"]))
+    if bool(cfg.get("GRAPH_TRACE", False)):
+        # SANDBOX graph-rewrite step 3: true skeleton-graph path tracing with
+        # width-aware junction resolution (replaces split + local smart-merge).
+        labels, through_junc_pts, junc_dil, n_smart_merges = decompose_graph(
+            skel, mask_bool, cfg)
+        n_lab = int(labels.max()) + 1
+    else:
+        # 2) split at junctions
+        pieces_bool, junc_dil = split_at_junctions(skel, int(cfg["JUNCTION_DILATE_PX"]))
 
-    # 3) connected components of pieces
-    n_lab, labels = cv2.connectedComponents(pieces_bool.astype(np.uint8), connectivity=8)
+        # 3) connected components of pieces
+        n_lab, labels = cv2.connectedComponents(pieces_bool.astype(np.uint8), connectivity=8)
 
-    # 3b) smart merge collinear arms at 3-arm junctions (conservative).
-    # Use the dilated junction mask the splitter actually carved out so the
-    # neighbor walk crosses the gap between junction blob and adjacent pieces.
-    smart_merge = bool(cfg.get("SMART_JUNCTION_MERGE", True))
-    through_junc_pts: set = set()
-    n_smart_merges = 0
-    if smart_merge and n_lab > 1:
-        n_lab_before = n_lab
-        junctions_for_merge = junc_dil & skel
-        labels, through_junc_pts = smart_merge_collinear_at_junctions(
-            labels, junctions_for_merge, n_lab,
-            walk_steps=int(cfg.get("SMART_JUNCTION_WALK_STEPS", 15)),
-            collinear_cos_thr=float(cfg.get("SMART_JUNCTION_COS_THR", -0.95)),
-            min_arm_len_px=int(cfg.get("SMART_JUNCTION_MIN_ARM_PX", 15)),
-            handle_x=bool(cfg.get("SMART_JUNCTION_HANDLE_X", True)),
+        # 3b) smart merge collinear arms at 3-arm junctions (conservative).
+        smart_merge = bool(cfg.get("SMART_JUNCTION_MERGE", True))
+        through_junc_pts = set()
+        n_smart_merges = 0
+        if smart_merge and n_lab > 1:
+            n_lab_before = n_lab
+            junctions_for_merge = junc_dil & skel
+            labels, through_junc_pts = smart_merge_collinear_at_junctions(
+                labels, junctions_for_merge, n_lab,
+                walk_steps=int(cfg.get("SMART_JUNCTION_WALK_STEPS", 15)),
+                collinear_cos_thr=float(cfg.get("SMART_JUNCTION_COS_THR", -0.95)),
+                min_arm_len_px=int(cfg.get("SMART_JUNCTION_MIN_ARM_PX", 15)),
+                handle_x=bool(cfg.get("SMART_JUNCTION_HANDLE_X", True)),
+            )
+            n_lab = int(labels.max()) + 1
+            n_smart_merges = max(0, (n_lab_before - 1) - (n_lab - 1))
+
+    # 3c) stage-1 gap bridging (Hough maxLineGap analog): join collinear facing
+    #     endpoints across small mask gaps BEFORE binning, so a gap-broken
+    #     filament stays one piece in one bin.
+    n_gap_bridges = 0
+    gap_px = float(cfg.get("GAP_BRIDGE_PX", 0.0))
+    if gap_px > 0 and n_lab > 2:
+        _dt_gap = cv2.distanceTransform(mask_bool.astype(np.uint8), cv2.DIST_L2, 3)
+        labels, n_gap_bridges = gap_bridge_pieces(
+            labels, _dt_gap, gap_px=gap_px,
+            cos_thr=float(cfg.get("GAP_BRIDGE_COS_THR", 0.7)),
+            walk=int(cfg.get("SMART_JUNCTION_WALK_STEPS", 10)),
+            max_wr=float(cfg.get("GAP_BRIDGE_MAX_WIDTH_RATIO", 1.6)),
+            max_resid=float(cfg.get("GAP_BRIDGE_MAX_RESID_PX", 2.0)),
         )
         n_lab = int(labels.max()) + 1
-        n_smart_merges = max(0, (n_lab_before - 1) - (n_lab - 1))
 
     # per-bin skeleton-pixel masks
     bin_skel = [np.zeros((H, W), dtype=bool) for _ in range(n_bins)]
@@ -693,7 +1012,7 @@ def decompose(mask_bool: np.ndarray, cfg: dict):
         "n_pieces_per_piece_binned": n_per_piece,
         "n_pieces_per_pixel_binned": n_per_pixel,
         "n_pieces_skipped_short": n_skipped_short,
-        "smart_junction_merge": bool(smart_merge),
+        "graph_trace": bool(cfg.get("GRAPH_TRACE", False)),
         "n_smart_junction_merges": int(n_smart_merges),
         "n_through_junction_pixels": int(len(through_junc_pts)),
         "n_adaptive_unified_pieces": int(n_adaptive_unified),
