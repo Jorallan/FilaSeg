@@ -39,9 +39,36 @@ Tools/
 4.postprocess/
   post_process_reconnect.py     Smooths/thickens reconnect labels and writes previews.
 
+eval/
+  instance_io.py                Load predicted instances / GT / fragments.
+  metrics.py                    Fragment-clustering F1 (+ panoptic), evaluate().
+  eval_reconnect.py             Eval CLI + self-test.
+  synth_generator.py            Scale-aware synthetic mask+SEM+GT generator.
+  run_batch.py                  Generate->run->eval->aggregate over samples.
+  diagnose_connections.py       Root-cause of each missed/wrong connection.
+  README.md                     Metric, experiment log, "why Hough wins".
+  SEM_PLAN.md                   Plan for the SEM-evidence reconnect step.
+
+sandbox/                        Experiment playground (production code untouched).
+  reconnect/                    Editable reconnect engine copy + ab_reconnect.py.
+  stage1/                       Editable skeleton stage-1 + run_full_skel.py.
+  ab_stage1.py, sweep_*.py      A/B + parameter-sweep harnesses.
+
 output/
   full_pipeline/                Generated runs, ignored by git.
 ```
+
+## Evaluation Subsystem (eval/)
+
+`eval/` measures instance-grouping quality so pipeline changes can be judged
+objectively (see `eval/README.md`). The primary metric is **fragment-clustering
+pairwise F1** on the FINAL output vs ground truth (real manual GT +
+synthetic). Key validated result: the tiled-Hough pipeline
+(`--no-skeleton-decompose`) is a well-tuned optimum at **F1 ≈ 0.71 (real) / 0.69
+(synthetic)**; ~25 tuning experiments across all four stages found no portable
+win. The remaining error is bridging real UNet mask gaps, which needs SEM
+evidence (`eval/SEM_PLAN.md`). All algorithm experiments are done in `sandbox/`
+first and ported only when validated on real + synthetic.
 
 ## Reconnect Notes
 
