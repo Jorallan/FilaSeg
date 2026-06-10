@@ -5,6 +5,15 @@ io:
 shared:
   filament_width_px: null        # set by stringart when available
 
+# Coordinated reconnect repair (validated 2026-06-09; ported 2026-06-10).
+# One master switch enabling: full coverage of the active distance gate,
+# reciprocal (mutual-best) proposals, guarded long bridges, the overlap
+# pre-pass (contact_continuation), and the close-boundary late pass
+# (boundary_continuation). Generic across 8 samples (5 dev + 3 unseen),
+# zero regressions; both local passes are SEM-free.
+reconnect_repair:
+  enabled: true
+
 thresholds:
   # Shared extraction and candidate search defaults.
   # Reconnect geometry gates are stage-local below.
@@ -19,6 +28,48 @@ overlap:
   kill_thr: 0.3                  # overlap fraction above which kill/trim action triggers
   min_keep_area: 15              # smallest kept trimmed fragment
   trim_dilate_px: 10              # 0 disables halo; >0 uses a temporary larger-component overlap-test halo
+
+# Repair pre-pass: recover endpoint overlaps/touches before overlap trimming.
+# Never uses orientation-layer distance; only fills measured 0-2 px
+# endpoint-to-skeleton contacts. Activated by reconnect_repair.enabled above.
+contact_continuation:
+  enabled: false
+  stage_only: stage_clear
+  max_support_gap_px: 2.0
+  min_axis_alignment: 0.94
+  max_width_ratio: 1.8
+  min_component_length_px: 8
+  min_overlap_pixels: 3
+  min_overlap_fraction: 0.10
+  required_supported_sides: 2
+  local_tangent_radius_px: 8
+  topology_prune_spur_px: 2
+  required_virtual_endpoints: 2
+  max_virtual_branch_regions: 2
+  branch_contact_radius_px: 6
+  require_mutual_best: true
+  max_passes: 3
+
+# Repair late pass: after the relaxed pass, consolidate only components whose
+# endpoints already meet within 2.1 px and whose virtual union is one two-ended
+# path. Repairs endpoint-to-boundary candidate misses without longer reach.
+boundary_continuation:
+  enabled: false
+  stage_only: stage_relaxed
+  max_support_gap_px: 2.1
+  min_axis_alignment: 0.92
+  max_width_ratio: 1.02
+  min_component_length_px: 8
+  min_overlap_pixels: 0
+  min_overlap_fraction: 0.0
+  required_supported_sides: 2
+  local_tangent_radius_px: 8
+  topology_prune_spur_px: 3
+  required_virtual_endpoints: 2
+  max_virtual_branch_regions: 4
+  branch_contact_radius_px: 20
+  require_mutual_best: true
+  max_passes: 3
 
 morphology:
   dilate_px: 1                   # label dilation radius
@@ -46,7 +97,7 @@ geometry:
 
 weights:
   distance: 1.0                  # distance score weight
-  forward: 2.0                   # forward alignment weight
+  forward: 3.0                   # forward alignment weight (tuned 2026-06-09: 2.0->3.0, real F1 0.720->0.735, synthetic neutral; saturates at 3.0)
   opposition: 1.0                # opposition score weight
   line_residual: 2.0             # residual score weight
   width_ratio: 0.25              # width mismatch weight
@@ -70,6 +121,8 @@ runtime:
   verbose: true                  # print progress output
   print_every_pass: 1            # pass logging interval
   print_every_merge: 20          # merge logging interval
+  require_mutual_best: false     # optional reciprocal proposal matching (forced on by reconnect_repair)
+  candidate_search_cover_tip_distance: false # discovery covers the active distance gate (forced on by reconnect_repair)
   max_merges_per_pass: 100       # merge cap per pass
   max_passes: 10                 # fallback pass cap
 
@@ -127,6 +180,9 @@ stage_relaxed:
     max_line_residual_px: 16     # wider residual cap
     max_curvature_delta: 0.2     # wider curvature cap
     max_bridge_intrusion_frac: 0.32 # wider intrusion cap
+    long_bridge_min_dist_px: 40 # optional absolute third-component cap starts here
+    long_bridge_max_intrusion_components: 1 # reject long bridges crossing 2+ component IDs
+    long_bridge_intrusion_residual_bypass_px: 6.5 # retain exceptionally collinear crowded bridges
     max_smooth_rms_px: 5.5       # wider smoothness cap
     max_arc_miss_frac: 0.75      # wider arc miss cap
     same_layer_max_line_resid_px: 20.0 # relaxed residual cap for same orientation-layer splits

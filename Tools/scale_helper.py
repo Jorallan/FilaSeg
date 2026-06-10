@@ -36,6 +36,14 @@ PX_LINEAR_KEYS = frozenset({
     # reconnect geometry (skeleton step counts proportional to pixel distance)
     "trace_steps", "fit_points", "smooth_trace_points", "bridge_samples",
     "bridge_clearance_px",
+    # reconnect_repair: long-bridge veto (stage_relaxed). Kept physically
+    # consistent with max_tip_distance_px so the veto tracks the active gate.
+    "long_bridge_min_dist_px", "long_bridge_intrusion_residual_bypass_px",
+    # reconnect_repair: contact_continuation / boundary_continuation local
+    # passes. These are endpoint-to-skeleton distances, radii, and spur/length
+    # caps in pixels, so they scale physically like every other distance gate.
+    "max_support_gap_px", "min_component_length_px", "local_tangent_radius_px",
+    "topology_prune_spur_px", "branch_contact_radius_px",
 })
 # Pixel-area keys: scale by sf².
 PX_AREA_KEYS = frozenset({"clean_min_area", "min_component_area", "min_keep_area"})
@@ -141,9 +149,6 @@ def scale_pipeline_args(args: argparse.Namespace, sf: float) -> None:
     args.smart_width_search_px = _lin(args.smart_width_search_px)
     args.smart_width_min_px    = _lin(args.smart_width_min_px)
     args.smart_width_max_px    = _lin(args.smart_width_max_px)
-    args.absorb_len           = _lin(args.absorb_len)
-    args.absorb_radius        = _lin(args.absorb_radius)
-    args.bridge_radius        = _lin(args.bridge_radius)
     # NOT scaled: pre_bin_threshold (intensity), pre_line_close_iters (count),
     # overlay_alpha (fraction).
 

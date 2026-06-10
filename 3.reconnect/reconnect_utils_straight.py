@@ -9,6 +9,7 @@ import math
 
 import numpy as np
 from scipy.ndimage import binary_dilation, convolve
+from scipy.spatial import cKDTree
 from skimage import io as skio
 from skimage.color import gray2rgb
 from skimage.measure import label as cc_label
@@ -29,7 +30,11 @@ _LOG_COLUMNS = [
     "dist", "forward_base", "forward_tar", "inward_opposition",
     "width_ratio", "line_resid", "arc_miss_frac", "curv_delta",
     "intrusion_frac", "smooth_rms", "max_turn_deg",
+    "intrusion_components",
     "base_tip_count", "tar_tip_count", "layer_gap",
+    "contact_support_base", "contact_support_tar", "contact_axis",
+    "contact_supported_sides", "contact_overlap_px", "contact_virtual_endpoints",
+    "contact_branch_regions",
 ]
 
 
@@ -658,6 +663,277 @@ class Proposal:
     metrics: Dict[str, float]
 
 
+@dataclass
+class ContactProposal:
+    base_id: int
+    tar_id: int
+    base_tip_name: str
+    tar_tip_name: str
+    bridge_mask: np.ndarray
+    score: Tuple[float, ...]
+    metrics: Dict[str, float]
+    log_record: Dict[str, object]
+
+
+def _nearest_tip_support(base: Component, target: Component) -> Optional[Dict[str, object]]:
+    """Return the base endpoint nearest to any target skeleton pixel."""
+    target_skel = target.skel if target.skel is not None else skeletonize(target.mask)
+    target_points = np.argwhere(target_skel)
+    if target_points.shape[0] == 0:
+        return None
+
+    tip_items = []
+    if isinstance(getattr(base, "tips", None), dict):
+        tip_items = list(base.tips.items())
+    if not tip_items:
+        tip_items = [
+            ("l", {"point": base.lt, "dir": base.ld}),
+            ("r", {"point": base.rt, "dir": base.rd}),
+        ]
+
+    tree = cKDTree(target_points.astype(np.float32))
+    best = None
+    for name, item in tip_items:
+        point = tuple(int(v) for v in item["point"])
+        dist, idx = tree.query(np.asarray(point, dtype=np.float32), k=1)
+        rec = {
+            "name": str(name),
+            "point": point,
+            "direction": np.asarray(item["dir"], dtype=np.float32),
+            "support_distance": float(dist),
+            "target_point": tuple(int(v) for v in target_points[int(idx)]),
+        }
+        key = (float(dist), str(name))
+        if best is None or key < best[0]:
+            best = (key, rec)
+    return None if best is None else best[1]
+
+
+def _local_skeleton_axis(
+    skel: np.ndarray,
+    point: Coord,
+    radius_px: float,
+) -> np.ndarray:
+    """Estimate an unsigned local centerline axis around an interior contact."""
+    points = np.argwhere(skel)
+    if points.shape[0] < 2:
+        return np.asarray([0.0, 0.0], dtype=np.float32)
+    delta = points.astype(np.float32) - np.asarray(point, dtype=np.float32)
+    local = points[np.sum(delta * delta, axis=1) <= float(radius_px) ** 2]
+    if local.shape[0] < 3:
+        order = np.argsort(np.sum(delta * delta, axis=1))
+        local = points[order[:min(7, points.shape[0])]]
+    centered = local.astype(np.float32) - local.astype(np.float32).mean(axis=0)
+    cov = centered.T @ centered
+    vals, vecs = np.linalg.eigh(cov)
+    axis = np.asarray(vecs[:, int(np.argmax(vals))], dtype=np.float32)
+    norm = float(np.linalg.norm(axis))
+    return axis / norm if norm > 1e-9 else np.asarray([0.0, 0.0], dtype=np.float32)
+
+
+def _evaluate_contact_pair(
+    base: Component,
+    tar: Component,
+    cfg: Dict,
+    config_key: str = "contact_continuation",
+) -> Optional[ContactProposal]:
+    """Evaluate a substantial-overlap continuation without endpoint projection."""
+    contact_cfg = cfg.get(config_key, {}) or {}
+    repair_enabled = bool(
+        (cfg.get("reconnect_repair", {}) or {}).get("enabled", False)
+    )
+    is_boundary_pass = config_key == "boundary_continuation"
+    max_support_gap = float(
+        contact_cfg.get("max_support_gap_px", 2.1 if is_boundary_pass else 2.0)
+    )
+    min_axis = float(
+        contact_cfg.get("min_axis_alignment", 0.92 if is_boundary_pass else 0.94)
+    )
+    max_width_ratio = float(
+        contact_cfg.get(
+            "max_width_ratio",
+            1.02 if is_boundary_pass and repair_enabled else 1.8,
+        )
+    )
+    min_component_len = float(contact_cfg.get("min_component_length_px", 8.0))
+    min_overlap_pixels = int(
+        contact_cfg.get("min_overlap_pixels", 0 if is_boundary_pass else 3)
+    )
+    min_overlap_fraction = float(
+        contact_cfg.get("min_overlap_fraction", 0.0 if is_boundary_pass else 0.10)
+    )
+    required_supported_sides = int(contact_cfg.get("required_supported_sides", 2))
+    topology_prune = int(
+        contact_cfg.get("topology_prune_spur_px", 3 if is_boundary_pass else 2)
+    )
+    tangent_radius = float(contact_cfg.get("local_tangent_radius_px", 8.0))
+    required_endpoints = int(contact_cfg.get("required_virtual_endpoints", 2))
+    max_branch_regions = int(
+        contact_cfg.get("max_virtual_branch_regions", 4 if is_boundary_pass else 2)
+    )
+    branch_contact_radius = int(
+        contact_cfg.get("branch_contact_radius_px", 20 if is_boundary_pass else 6)
+    )
+
+    if min(base.skel_len, tar.skel_len) < min_component_len:
+        return None
+
+    base_support = _nearest_tip_support(base, tar)
+    tar_support = _nearest_tip_support(tar, base)
+    if base_support is None or tar_support is None:
+        return None
+
+    sb = float(base_support["support_distance"])
+    st = float(tar_support["support_distance"])
+    overlap_px = int(np.count_nonzero(base.mask & tar.mask))
+    if sb > max_support_gap and st > max_support_gap and overlap_px == 0:
+        return None
+    overlap_fraction = float(overlap_px / max(1.0, min(base.skel_len, tar.skel_len)))
+
+    base_point = tuple(int(v) for v in base_support["point"])
+    tar_point = tuple(int(v) for v in tar_support["point"])
+    rec: Dict[str, object] = {
+        "base_id": int(base.id),
+        "tar_id": int(tar.id),
+        "base_tip": str(base_support["name"]),
+        "tar_tip": str(tar_support["name"]),
+        "base_tip_r": int(base_point[0]),
+        "base_tip_c": int(base_point[1]),
+        "tar_tip_r": int(tar_point[0]),
+        "tar_tip_c": int(tar_point[1]),
+        "dist": float(min(sb, st)),
+        "width_ratio": float(max(base.mean_width, tar.mean_width) / max(1e-6, min(base.mean_width, tar.mean_width))),
+        "base_tip_count": int(len(base.tips or {})),
+        "tar_tip_count": int(len(tar.tips or {})),
+        # Recorded for diagnosis only. It is deliberately not an acceptance gate.
+        "layer_gap": int(abs(int(base.layer) - int(tar.layer))),
+        "contact_support_base": sb,
+        "contact_support_tar": st,
+        "contact_overlap_px": overlap_px,
+    }
+
+    def reject(reason: str) -> None:
+        rec["reason"] = reason
+        _log_row(rec)
+
+    if overlap_px < min_overlap_pixels or overlap_fraction < min_overlap_fraction:
+        reject("contact_overlap_support")
+        return None
+
+    supported_base = sb <= max_support_gap
+    supported_tar = st <= max_support_gap
+    supported_sides = int(supported_base) + int(supported_tar)
+    rec["contact_supported_sides"] = supported_sides
+    if supported_sides == 0:
+        reject("contact_no_endpoint_support")
+        return None
+    if supported_sides < required_supported_sides:
+        reject("contact_one_sided")
+        return None
+
+    alignments = []
+    if supported_base:
+        target_axis = _local_skeleton_axis(
+            tar.skel, tuple(int(v) for v in base_support["target_point"]), tangent_radius
+        )
+        alignments.append(abs(cosine(np.asarray(base_support["direction"]), target_axis)))
+    if supported_tar:
+        base_axis = _local_skeleton_axis(
+            base.skel, tuple(int(v) for v in tar_support["target_point"]), tangent_radius
+        )
+        alignments.append(abs(cosine(np.asarray(tar_support["direction"]), base_axis)))
+    axis = float(min(alignments)) if alignments else 0.0
+    rec["contact_axis"] = float(axis)
+    if axis < min_axis:
+        reject("contact_axis")
+        return None
+
+    width_ratio = float(rec["width_ratio"])
+    if width_ratio > max_width_ratio:
+        reject("contact_width")
+        return None
+
+    # Only fill the measured endpoint-to-skeleton contact gaps. Each segment is
+    # independently capped by max_support_gap; there is no long-range bridge.
+    bridge = np.zeros(base.mask.shape, dtype=bool)
+    if supported_base:
+        bridge |= draw_gap(
+            base_point,
+            tuple(int(v) for v in base_support["target_point"]),
+            base.mask.shape,
+        )
+    if supported_tar:
+        bridge |= draw_gap(
+            tar_point,
+            tuple(int(v) for v in tar_support["target_point"]),
+            base.mask.shape,
+        )
+    virtual = base.mask | tar.mask | bridge
+    virtual_skel = skeletonize(virtual)
+    if topology_prune > 0:
+        virtual_skel = _prune_short_skeleton_spurs(virtual_skel, topology_prune)
+
+    connected = int(cc_label(virtual_skel, connectivity=2).max())
+    endpoint_count = int(len(endpoints_from_skeleton(virtual_skel)))
+    branchpoints = branchpoints_8(virtual_skel)
+    branch_regions = int(cc_label(branchpoints, connectivity=2).max())
+    rec["contact_virtual_endpoints"] = endpoint_count
+    rec["contact_branch_regions"] = branch_regions
+    if connected != 1:
+        reject("contact_disconnected")
+        return None
+    if endpoint_count != required_endpoints:
+        reject("contact_topology_endpoints")
+        return None
+    if branch_regions > max_branch_regions:
+        reject("contact_topology_branch")
+        return None
+    if branch_regions:
+        contact_region = (base.mask & tar.mask) | bridge
+        if not np.any(contact_region):
+            reject("contact_topology_branch_without_overlap")
+            return None
+        contact_halo = (
+            binary_dilation(contact_region, iterations=branch_contact_radius)
+            if branch_contact_radius > 0
+            else contact_region
+        )
+        if np.any(branchpoints & ~contact_halo):
+            reject("contact_topology_branch_outside_contact")
+            return None
+
+    score = (
+        float(2 - supported_sides),
+        float(min(sb, st)),
+        float(1.0 - axis),
+        float(math.log(max(1.0, width_ratio))),
+        -float(overlap_px),
+        int(min(base.id, tar.id)),
+        int(max(base.id, tar.id)),
+    )
+    metrics = {
+        "support_base": sb,
+        "support_tar": st,
+        "supported_sides": float(supported_sides),
+        "axis": axis,
+        "width_ratio": width_ratio,
+        "overlap_px": float(overlap_px),
+        "overlap_fraction": overlap_fraction,
+        "virtual_endpoints": float(endpoint_count),
+        "branch_regions": float(branch_regions),
+    }
+    return ContactProposal(
+        base_id=base.id,
+        tar_id=tar.id,
+        base_tip_name=str(base_support["name"]),
+        tar_tip_name=str(tar_support["name"]),
+        bridge_mask=bridge,
+        score=score,
+        metrics=metrics,
+        log_record=rec,
+    )
+
+
 def _tip_data(comp: Component, name: str) -> Tuple[Coord, np.ndarray, float, np.ndarray]:
     if isinstance(getattr(comp, "tips", None), dict) and name in comp.tips:
         t = comp.tips[name]
@@ -774,6 +1050,9 @@ def _evaluate_tip_pair(
     thr = cfg.get("thresholds", {})
     geom = cfg.get("geometry", {})
     wgt = cfg.get("weights", {})
+    repair_enabled = bool(
+        (cfg.get("reconnect_repair", {}) or {}).get("enabled", False)
+    )
 
     bp, bd, bcurv, btrace = _tip_data(base, base_tip_name)
     tp, td, tcurv, ttrace = _tip_data(tar, tar_tip_name)
@@ -936,10 +1215,33 @@ def _evaluate_tip_pair(
     bridge_eval  = binary_dilation(bridge_mask, iterations=clearance_px) if clearance_px > 0 else bridge_mask
     touched = global_label[bridge_eval]
     touched = touched[(touched != 0) & (touched != base.id) & (touched != tar.id)]
-    intrusion_frac = float(len(np.unique(touched))) / max(1.0, dist)
+    intrusion_components = int(len(np.unique(touched)))
+    intrusion_frac = float(intrusion_components) / max(1.0, dist)
     rec["intrusion_frac"] = intrusion_frac
+    rec["intrusion_components"] = intrusion_components
     if intrusion_frac > float(thr.get("max_bridge_intrusion_frac", 0.10)):
         return reject("bridge_intrusion")
+    long_bridge_min_dist = float(
+        thr.get("long_bridge_min_dist_px", 40.0 if repair_enabled else math.inf)
+    )
+    long_bridge_max_intrusions = int(
+        thr.get(
+            "long_bridge_max_intrusion_components",
+            1 if repair_enabled else 2**31 - 1,
+        )
+    )
+    long_bridge_intrusion_residual_bypass = float(
+        thr.get(
+            "long_bridge_intrusion_residual_bypass_px",
+            6.5 if repair_enabled else -math.inf,
+        )
+    )
+    if (
+        dist >= long_bridge_min_dist
+        and intrusion_components > long_bridge_max_intrusions
+        and line_resid > long_bridge_intrusion_residual_bypass
+    ):
+        return reject("long_bridge_intrusion_components")
 
     tp_pts = int(geom.get("smooth_trace_points", 18))
     smooth_rms, smooth_curv, max_turn_deg = _local_smoothness_metrics(
@@ -982,6 +1284,7 @@ def _evaluate_tip_pair(
         "inward_opposition": inward_opposition, "width_ratio": width_ratio,
         "line_residual": line_resid, "curv_delta": curv_delta,
         "intrusion_frac": intrusion_frac, "smooth_rms": smooth_rms,
+        "intrusion_components": float(intrusion_components),
         "smooth_curv": smooth_curv, "max_turn_deg": max_turn_deg,
     }
     score = (
@@ -1022,16 +1325,29 @@ def _reconnect_components_inner(components: List[Component], cfg: Dict) -> List[
     geom    = cfg.get("geometry", {})
     morph   = cfg.get("morphology", {})
     overlap_cfg = cfg.get("overlap", {})
+    repair_enabled = bool(
+        (cfg.get("reconnect_repair", {}) or {}).get("enabled", False)
+    )
 
     verbose              = bool(runtime.get("verbose", True))
     max_passes           = int(runtime.get("max_passes", 200))
     max_merges_per_pass  = int(runtime.get("max_merges_per_pass", 100))
     print_every_pass     = int(runtime.get("print_every_pass", 1))
     print_every_merge    = int(runtime.get("print_every_merge", 10))
+    require_mutual_best  = repair_enabled or bool(
+        runtime.get("require_mutual_best", False)
+    )
 
     trace_steps        = int(max(4, geom.get("trace_steps", morph.get("tip_dir_steps", 20))))
     fit_points         = int(max(4, geom.get("fit_points", 12)))
     search_size        = int(thr.get("search_size_px", 25))
+    if repair_enabled or bool(
+        runtime.get("candidate_search_cover_tip_distance", False)
+    ):
+        search_size = max(
+            search_size,
+            int(math.ceil(float(thr.get("max_tip_distance_px", search_size)))),
+        )
     candidate_layers   = str(thr.get("candidate_layers", "all")).lower().strip()
     overlap_kill_thr = float(overlap_cfg.get("kill_thr", thr.get("overlap_kill_thr", 0.70)))
     overlap_min_keep_area = int(overlap_cfg.get("min_keep_area", thr.get("min_component_area", 15)))
@@ -1194,7 +1510,145 @@ def _reconnect_components_inner(components: List[Component], cfg: Dict) -> List[
                     break
         return events
 
-    pass_idx = total_merges = total_kills = 0
+    def _merge_continuations(
+        config_key: str,
+        default_stage: str,
+        print_tag: str,
+    ) -> int:
+        """Merge mutually best local continuations for one configured pass."""
+        continuation_cfg = cfg.get(config_key, {}) or {}
+        if not (
+            repair_enabled
+            or bool(continuation_cfg.get("enabled", False))
+        ):
+            return 0
+        stage_only = str(
+            continuation_cfg.get("stage_only", default_stage)
+        ).strip()
+        if stage_only and _CURRENT_STAGE != stage_only:
+            return 0
+
+        max_contact_passes = int(continuation_cfg.get("max_passes", 3))
+        require_mutual_best = bool(
+            continuation_cfg.get("require_mutual_best", True)
+        )
+        contact_merges = 0
+        bbox_pad = int(
+            math.ceil(float(continuation_cfg.get("max_support_gap_px", 2.0)))
+        )
+
+        for contact_pass in range(max_contact_passes):
+            alive = sorted(_alive(), key=lambda z: (z.id,))
+            proposals: List[ContactProposal] = []
+            for i, base in enumerate(alive):
+                if not base.exist:
+                    continue
+                for tar in alive[i + 1:]:
+                    if not tar.exist or not _bbox_intersects(base.bbox, tar.bbox, pad=bbox_pad):
+                        continue
+                    prop = _evaluate_contact_pair(
+                        base,
+                        tar,
+                        cfg,
+                        config_key=config_key,
+                    )
+                    if prop is not None:
+                        proposals.append(prop)
+
+            if not proposals:
+                break
+
+            best_for: Dict[int, ContactProposal] = {}
+            for prop in proposals:
+                for cid in (prop.base_id, prop.tar_id):
+                    prev = best_for.get(cid)
+                    if prev is None or prop.score < prev.score:
+                        best_for[cid] = prop
+
+            selected: List[ContactProposal] = []
+            for prop in proposals:
+                if require_mutual_best:
+                    pair = (min(prop.base_id, prop.tar_id), max(prop.base_id, prop.tar_id))
+                    base_best = best_for.get(prop.base_id)
+                    tar_best = best_for.get(prop.tar_id)
+                    base_pair = None if base_best is None else (
+                        min(base_best.base_id, base_best.tar_id),
+                        max(base_best.base_id, base_best.tar_id),
+                    )
+                    tar_pair = None if tar_best is None else (
+                        min(tar_best.base_id, tar_best.tar_id),
+                        max(tar_best.base_id, tar_best.tar_id),
+                    )
+                    if base_pair != pair or tar_pair != pair:
+                        rec = dict(prop.log_record)
+                        rec["reason"] = "contact_not_mutual_best"
+                        _log_row(rec)
+                        continue
+                selected.append(prop)
+
+            if not selected:
+                break
+
+            id2comp = _id2comp()
+            used: set[int] = set()
+            merged_this_pass = 0
+            for prop in sorted(selected, key=lambda p: p.score):
+                if prop.base_id in used or prop.tar_id in used:
+                    continue
+                base = id2comp.get(prop.base_id)
+                tar = id2comp.get(prop.tar_id)
+                if base is None or tar is None or not base.exist or not tar.exist:
+                    continue
+
+                keep, kill = base, tar
+                if (
+                    tar.skel_len,
+                    float(np.count_nonzero(tar.mask)),
+                    -tar.id,
+                ) > (
+                    base.skel_len,
+                    float(np.count_nonzero(base.mask)),
+                    -base.id,
+                ):
+                    keep, kill = tar, base
+
+                keep.mask = keep.mask | kill.mask | prop.bridge_mask
+                kill.exist = False
+                keep.refresh_geom(trace_steps, fit_points, **refresh_kwargs)
+                used.add(base.id)
+                used.add(tar.id)
+                merged_this_pass += 1
+                contact_merges += 1
+
+                rec = dict(prop.log_record)
+                rec["reason"] = "accepted"
+                _log_row(rec)
+                if verbose:
+                    m = prop.metrics
+                    print(
+                        f"  [merge-{print_tag}] keep(id={keep.id},layer={keep.layer}) "
+                        f"+ kill(id={kill.id},layer={kill.layer}) "
+                        f"| support=({m['support_base']:.2f},{m['support_tar']:.2f}) "
+                        f"sides={int(m['supported_sides'])} axis={m['axis']:.3f} "
+                        f"overlap={int(m['overlap_px'])}"
+                    )
+
+            if merged_this_pass == 0:
+                break
+            if verbose:
+                print(
+                    f"[reconnect-{print_tag}] pass {contact_pass + 1} "
+                    f"| merged={merged_this_pass} alive={len(_alive())}"
+                )
+        return contact_merges
+
+    contact_merges = _merge_continuations(
+        "contact_continuation",
+        "stage_clear",
+        "contact",
+    )
+    pass_idx = total_kills = 0
+    total_merges = contact_merges
     while pass_idx < max_passes:
         pass_idx += 1
         if verbose and pass_idx % print_every_pass == 0:
@@ -1248,6 +1702,15 @@ def _reconnect_components_inner(components: List[Component], cfg: Dict) -> List[
             if key not in best_pair or p.score < best_pair[key].score:
                 best_pair[key] = p
 
+        if require_mutual_best:
+            best_target = {p.base_id: p.tar_id for p in proposals}
+            best_pair = {
+                key: p
+                for key, p in best_pair.items()
+                if best_target.get(p.base_id) == p.tar_id
+                and best_target.get(p.tar_id) == p.base_id
+            }
+
         used_ids: set[int] = set()
         merges_this_pass = 0
 
@@ -1285,4 +1748,9 @@ def _reconnect_components_inner(components: List[Component], cfg: Dict) -> List[
         if merges_this_pass == 0 and kills == 0:
             break
 
+    total_merges += _merge_continuations(
+        "boundary_continuation",
+        "stage_relaxed",
+        "boundary",
+    )
     return components
