@@ -731,6 +731,44 @@ def _local_skeleton_axis(
     return axis / norm if norm > 1e-9 else np.asarray([0.0, 0.0], dtype=np.float32)
 
 
+# ── crossing-prevention: local orientation consistency ─────────────────────
+
+
+def _mask_orientation_deg(mask: np.ndarray) -> float:
+    """Principal-axis orientation of a piece in [0, 180)."""
+    rc = np.argwhere(mask)
+    if rc.shape[0] < 2:
+        return 0.0
+    rc = rc - rc.mean(axis=0)
+    cov = np.cov(rc.T)
+    if not np.all(np.isfinite(cov)):
+        return 0.0
+    w, v = np.linalg.eigh(cov)
+    major = v[:, int(np.argmax(w))]          # (dr, dc)
+    ang = math.degrees(math.atan2(float(major[0]), float(major[1])))
+    return ang % 180.0
+
+
+def _local_orientation_deg(mask: np.ndarray, point, radius: float) -> float:
+    """Orientation of the piece WITHIN a window around `point` (the join end).
+
+    Local, not whole-piece: a smooth curve's local end direction matches its next
+    piece (merge allowed), while a crossing's two arms diverge locally (blocked).
+    """
+    r = int(round(float(point[0]))); c = int(round(float(point[1]))); R = int(radius)
+    r0, r1 = max(0, r - R), min(mask.shape[0], r + R + 1)
+    c0, c1 = max(0, c - R), min(mask.shape[1], c + R + 1)
+    return _mask_orientation_deg(mask[r0:r1, c0:c1])
+
+
+def _orient_mismatch_deg(mask_a, pt_a, mask_b, pt_b, radius: float) -> float:
+    """Undirected local-orientation difference (deg) between two pieces at a join."""
+    a = _local_orientation_deg(mask_a, pt_a, radius)
+    b = _local_orientation_deg(mask_b, pt_b, radius)
+    d = abs(a - b)
+    return min(d, 180.0 - d)
+
+
 def _evaluate_contact_pair(
     base: Component,
     tar: Component,
@@ -815,6 +853,17 @@ def _evaluate_contact_pair(
     def reject(reason: str) -> None:
         rec["reason"] = reason
         _log_row(rec)
+
+    # PREVENTION (overlap path): reject fusing pieces whose LOCAL orientations at
+    # the contact disagree (a crossing); a continuation along one filament agrees.
+    _max_orient_mismatch = float((cfg.get("thresholds", {}) or {}).get("max_orientation_mismatch_deg", 180.0))
+    if _max_orient_mismatch < 180.0:
+        _rad = float((cfg.get("thresholds", {}) or {}).get("orient_mismatch_radius_px", 16.0))
+        _dao = _orient_mismatch_deg(base.mask, base_point, tar.mask, tar_point, _rad)
+        rec["orient_mismatch"] = float(_dao)
+        if _dao >= _max_orient_mismatch:
+            reject("orientation_mismatch")
+            return None
 
     if overlap_px < min_overlap_pixels or overlap_fraction < min_overlap_fraction:
         reject("contact_overlap_support")
@@ -1102,6 +1151,17 @@ def _evaluate_tip_pair(
         "tar_tip_count": int(len(tar.tips or {})),
         "layer_gap": int(layer_gap),
     })
+
+    # PREVENTION: reject joins between pieces whose LOCAL orientations at the join
+    # disagree (a steep crossing) — robust to the tip-tangent fooling that lets
+    # forward/opposition pass a crossing. Collinear and gently-curving joins agree.
+    _max_orient_mismatch = float(thr.get("max_orientation_mismatch_deg", 180.0))
+    if _max_orient_mismatch < 180.0:
+        _rad = float(thr.get("orient_mismatch_radius_px", 16.0))
+        _dao = _orient_mismatch_deg(base.mask, bp, tar.mask, tp, _rad)
+        rec["orient_mismatch"] = float(_dao)
+        if _dao >= _max_orient_mismatch:
+            return reject("orientation_mismatch")
 
     min_forward_cos       = float(thr.get("min_forward_cos",       0.65))
     min_inward_opposition = float(thr.get("min_inward_opposition", 0.60))

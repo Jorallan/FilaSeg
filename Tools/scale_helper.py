@@ -44,6 +44,9 @@ PX_LINEAR_KEYS = frozenset({
     # caps in pixels, so they scale physically like every other distance gate.
     "max_support_gap_px", "min_component_length_px", "local_tangent_radius_px",
     "topology_prune_spur_px", "branch_contact_radius_px",
+    # crossing-prevention: local window radius for the orientation gate (a pixel
+    # distance). The angle gate (max_orientation_mismatch_deg) is scale-free.
+    "orient_mismatch_radius_px",
 })
 # Pixel-area keys: scale by sf².
 PX_AREA_KEYS = frozenset({"clean_min_area", "min_component_area", "min_keep_area"})

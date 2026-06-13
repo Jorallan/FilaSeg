@@ -143,6 +143,8 @@ stage_clear:
     clear_merge_overrun_max_dist_px: 30.0 # longer clear merge only for long collinear endpoints that overshot each other
     clear_merge_multitip_min_forward_cos: 0.0 # require non-backward clear merges into multi-tip components
     clear_merge_backward_max_layer_gap: 3 # block backward clear merges across distant circular orientation bins
+    max_orientation_mismatch_deg: 40 # crossing-PREVENTION: reject fusing two pieces whose local orientations differ by >=40deg (a crossing). Validated dev +0.036 / unseen +0.047 F1, P+R both up, 0 regressions (2026-06-11)
+    orient_mismatch_radius_px: 16 # local window for the orientation gate (scales with um/px)
 
 # Stage 2: strict_tip_reconnect
 # Close endpoint reconnects with normal forward, opposition, residual, smoothness, and turn gates.
@@ -164,6 +166,8 @@ stage_strict:
     same_layer_max_line_resid_px: 20.0 # relaxed residual cap for same orientation-layer splits
     same_layer_min_forward_cos: 0.88 # forward gate for same-layer residual relaxation
     same_layer_min_opposition: 0.85 # opposition gate for same-layer residual relaxation
+    max_orientation_mismatch_deg: 40 # crossing-prevention (see stage_clear)
+    orient_mismatch_radius_px: 16 # local window for the orientation gate
 
 # Stage 3: relaxed_tip_reconnect
 # Wider search with relaxed gates for longer but still smooth/consistent endpoint bridges.
@@ -175,7 +179,7 @@ stage_relaxed:
     merge_mode: normal           # use the full normal evaluator
     max_tip_distance_px: 50      # wider distance cap
     min_forward_cos: 0.72        # relaxed forward alignment
-    min_inward_opposition: 0.4   # relaxed tip opposition
+    min_inward_opposition: 0.85  # long bridges must be strongly collinear: 0.4->0.85 suppresses wrong-bridge over-merges (validated dev +0.017 F1 / unseen 0 regressions, 2026-06-11)
     max_turn_deg: 70.0           # wider turn cap
     max_line_residual_px: 16     # wider residual cap
     max_curvature_delta: 0.2     # wider curvature cap
@@ -188,3 +192,5 @@ stage_relaxed:
     same_layer_max_line_resid_px: 20.0 # relaxed residual cap for same orientation-layer splits
     same_layer_min_forward_cos: 0.88 # forward gate for same-layer residual relaxation
     same_layer_min_opposition: 0.85 # opposition gate for same-layer residual relaxation
+    max_orientation_mismatch_deg: 40 # crossing-prevention (see stage_clear)
+    orient_mismatch_radius_px: 16 # local window for the orientation gate
