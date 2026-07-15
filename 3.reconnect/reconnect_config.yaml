@@ -187,7 +187,7 @@ stage_relaxed:
     long_bridge_min_dist_px: 40 # optional absolute third-component cap starts here
     long_bridge_max_intrusion_components: 1 # reject long bridges crossing 2+ component IDs
     long_bridge_intrusion_residual_bypass_px: 6.5 # retain exceptionally collinear crowded bridges
-    max_smooth_rms_px: 5.5       # wider smoothness cap
+    max_smooth_rms_px: 1.4       # wider smoothness cap (5.5->1.4: relaxed-stage wrong accepts are long/wobbly bridges [smooth_rms median 0.94] vs true [0.52]; truth-labeled on synthetic_v3 dense. real F1 +0.020 (P+R both up), synthetic_val 0/0/0/0 clean, dense mean neutral. 2026-07-14)
     max_arc_miss_frac: 0.75      # wider arc miss cap
     same_layer_max_line_resid_px: 20.0 # relaxed residual cap for same orientation-layer splits
     same_layer_min_forward_cos: 0.88 # forward gate for same-layer residual relaxation

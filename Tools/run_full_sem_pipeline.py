@@ -53,7 +53,6 @@ DEFAULT_TILE_SIZE       = 128
 DEFAULT_ANGLE_STEP_DEG  = 15
 DEFAULT_TILE_GRID_OFFSETS  = 4
 DEFAULT_TILE_GRID_VOTE_MIN = 2
-DEFAULT_SKELETON_DECOMPOSE = True  # Experimental/WIP stage-1 path; keep outputs under review.
 
 # ── Preprocess (stage 2) ──────────────────────────────────────────────────
 DEFAULT_PRE_BIN_THRESHOLD    = 127  # grayscale threshold for binarising branch masks
@@ -181,11 +180,8 @@ def parse_args() -> argparse.Namespace:
                          'e.g. "4" or "[[0,0],[64,0],[0,64],[64,64]]". Omit for single-grid.')
     ap.add_argument("--tile-grid-vote-min", type=int, default=DEFAULT_TILE_GRID_VOTE_MIN,
                     help="Min grids a pixel must appear in to be kept (1=OR, 2+=majority).")
-    ap.add_argument("--skeleton-decompose", action=argparse.BooleanOptionalAction,
-                    default=DEFAULT_SKELETON_DECOMPOSE,
-                    help="Use experimental/WIP skeleton_decompose.py instead of stringart_tiles.py for stage 1.")
-    # Stringart (tiled-Hough) internal knobs — forwarded to stringart_tiles only
-    # in the tiled path. Default None = stringart's own auto-scale picks them.
+    # Stringart (tiled-Hough) internal knobs. Default None = stringart's own
+    # auto-scale picks them.
     ap.add_argument("--hough-threshold", type=int, default=None)
     ap.add_argument("--hough-min-line-length", type=int, default=None)
     ap.add_argument("--hough-max-line-gap", type=int, default=None)
@@ -400,24 +396,22 @@ def main() -> None:
     _cm["clear_merge_backward_max_layer_gap"] = max(1, int(round(_base_gap * _branch_count / _default_branch_count)))
     reconnect_cfg.write_text(_yaml.dump(_cfg, default_flow_style=False, sort_keys=False), encoding="utf-8")
 
-    stage1_script = "skeleton_decompose.py" if args.skeleton_decompose else "stringart_tiles.py"
     stage1_extra = []
-    if not args.skeleton_decompose:   # tiled-Hough internal knobs (optional)
-        if args.stringart_no_auto_scale:
-            stage1_extra += ["--no-auto-scale"]
-        for _flag, _val in (("--hough-threshold", args.hough_threshold),
-                            ("--hough-min-line-length", args.hough_min_line_length),
-                            ("--hough-max-line-gap", args.hough_max_line_gap),
-                            ("--min-accept-newpix", args.min_accept_newpix),
-                            ("--min-accept-density", args.min_accept_density),
-                            ("--auto-scale-hough-threshold-mult", args.hough_threshold_mult),
-                            ("--auto-scale-hough-maxgap-mult", args.hough_maxgap_mult),
-                            ("--auto-scale-hough-minlen-mult", args.hough_minlen_mult),
-                            ("--auto-scale-newpix-mult", args.newpix_mult)):
-            if _val is not None:
-                stage1_extra += [_flag, str(_val)]
+    if args.stringart_no_auto_scale:
+        stage1_extra += ["--no-auto-scale"]
+    for _flag, _val in (("--hough-threshold", args.hough_threshold),
+                        ("--hough-min-line-length", args.hough_min_line_length),
+                        ("--hough-max-line-gap", args.hough_max_line_gap),
+                        ("--min-accept-newpix", args.min_accept_newpix),
+                        ("--min-accept-density", args.min_accept_density),
+                        ("--auto-scale-hough-threshold-mult", args.hough_threshold_mult),
+                        ("--auto-scale-hough-maxgap-mult", args.hough_maxgap_mult),
+                        ("--auto-scale-hough-minlen-mult", args.hough_minlen_mult),
+                        ("--auto-scale-newpix-mult", args.newpix_mult)):
+        if _val is not None:
+            stage1_extra += [_flag, str(_val)]
     run([
-        args.python, ROOT / "1.stringart" / stage1_script,
+        args.python, ROOT / "1.stringart" / "stringart_tiles.py",
         "--input", args.mask,
         "--output-root", run_dir,
         "--output-folder-name", STAGE_STRINGART,
@@ -514,8 +508,7 @@ def main() -> None:
         },
         "paths": {k: str(v) for k, v in paths.items()},
         "stage1": {
-            "skeleton_decompose": bool(args.skeleton_decompose),
-            "script": stage1_script,
+            "script": "stringart_tiles.py",
         },
     }
     (final_out / f"{base}_pipeline_manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")

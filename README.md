@@ -15,8 +15,9 @@ Tools/
   mask_edit.py                  Legacy/manual mask editor utility.
 
 1.stringart/
-  skeleton_decompose.py         Experimental/WIP skeleton-first orientation decomposition.
-  stringart_tiles.py            Older tile-wise greedy Hough vectorizer.
+  stringart_tiles.py            Tiled Hough vectorizer; the only stage-1 method (validated
+                                 winner over an experimental skeleton-first approach that was
+                                 tried and removed — see Experimentation.md).
 
 2.preprocess/
   preprocess_stringart_branches.py
@@ -120,14 +121,13 @@ python Tools\troubleshoot_reconnect.py trace-component --run output\full_pipelin
 
 Reconnect rejection logging can be enabled through the `debug.rejection_log_path` key in `3.reconnect/reconnect_config.yaml`; the straight evaluator writes candidate accept/reject metrics to that CSV path. When the full runner changes `--angle-step-deg`, it also rescales `clear_merge_backward_max_layer_gap` from the 15-degree YAML baseline to keep the allowed orientation span comparable as branch count changes.
 
-## Stage 1 Options
+## Stage 1
 
-The full runner currently defaults to `skeleton_decompose.py`, which skeletonizes the full mask, splits the skeleton at junctions, and groups centerline pixels into orientation bins from their local tangent direction. Two algorithms keep smoothly-curving filaments together when angle bins would otherwise fragment them:
-
-- **Adaptive binning** (`--adaptive-bin-max-span`, `--adaptive-bin-min-frac`): when a single skeleton piece's per-pixel bin assignments span only a few cyclically-adjacent bins (a smooth curve crossing one bin boundary), all of its pixels are unified to the dominant bin. Pieces that span many non-adjacent bins (genuine sharp turns) keep the per-pixel split.
-- **Smart junction merge** (`--smart-junction-merge`, `--smart-junction-cos-thr`, `--smart-junction-walk-steps`, `--smart-junction-min-arm-px`, `--smart-junction-handle-x`): at each junction blob, the tangents of adjacent skeleton arms (walked outward for a few pixels) are compared, and a pair is fused if both arms are long enough and their tangents are very anti-parallel (i.e. the junction is a straight through-pass). The whole junction blob is added to the merged piece as a bridge so its connected component spans both arms. With `--smart-junction-handle-x`, the same rule runs at 4-arm X-crossings.
-
-Both algorithms are conservative by default; they will not merge a 90-degree T-arm into a through-bundle. Pass `--no-skeleton-decompose` to use the older tiled Hough stage instead.
+`1.stringart/stringart_tiles.py` (tiled Hough vectorizer) is the only stage-1 method. An
+experimental skeleton-first alternative (skeletonize → split at junctions → bin by local
+tangent) was built, tuned, and benchmarked at length; it never beat tiled Hough (best result
+~0.635 F1 vs tiled's ~0.71-0.735) and was removed 2026-07-14. See
+[Experimentation.md](Experimentation.md) for the full comparison and why tiled Hough wins.
 
 ## Stringart Acceptance
 

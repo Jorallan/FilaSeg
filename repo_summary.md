@@ -23,8 +23,8 @@ Tools/
   mask_edit.py                  Legacy OpenCV mask editing utility.
 
 1.stringart/
-  skeleton_decompose.py         Experimental/WIP skeleton-first orientation decomposition.
-  stringart_tiles.py            Older tile-wise greedy Hough vectorizer.
+  stringart_tiles.py            Tiled Hough vectorizer; the only stage-1 method (a skeleton-
+                                 first alternative was tried and removed — see Experimentation.md).
 
 2.preprocess/
   preprocess_stringart_branches.py
@@ -51,8 +51,8 @@ eval/
 
 sandbox/                        Experiment playground (production code untouched).
   reconnect/                    Editable reconnect engine copy + ab_reconnect.py.
-  stage1/                       Editable skeleton stage-1 + run_full_skel.py.
-  ab_stage1.py, sweep_*.py      A/B + parameter-sweep harnesses.
+  postprocess/                  Editable postprocess (stage 4) copy + ab_postprocess.py.
+  sweep_*.py                    Parameter-sweep harnesses.
 
 output/
   full_pipeline/                Generated runs, ignored by git.
@@ -63,12 +63,14 @@ output/
 `eval/` measures instance-grouping quality so pipeline changes can be judged
 objectively (see `eval/README.md`). The primary metric is **fragment-clustering
 pairwise F1** on the FINAL output vs ground truth (real manual GT +
-synthetic). Key validated result: the tiled-Hough pipeline
-(`--no-skeleton-decompose`) is a well-tuned optimum at **F1 ≈ 0.71 (real) / 0.69
-(synthetic)**; ~25 tuning experiments across all four stages found no portable
-win. The remaining error is bridging real UNet mask gaps, which needs SEM
-evidence (`eval/SEM_PLAN.md`). All algorithm experiments are done in `sandbox/`
-first and ported only when validated on real + synthetic.
+synthetic). Key validated result: the tiled-Hough pipeline is a well-tuned
+optimum at **F1 ≈ 0.71-0.775 (real) / 0.69 (synthetic)**; dozens of tuning
+experiments across all four stages found few portable wins (see
+[Experimentation.md](Experimentation.md) for the full history — every
+experiment tried, what worked, what didn't, and why). The remaining error is
+bridging real UNet mask gaps, which needs SEM evidence (`eval/SEM_PLAN.md`).
+All algorithm experiments are done in `sandbox/` first and ported only when
+validated on real + synthetic.
 
 ## Reconnect Notes
 
@@ -115,14 +117,14 @@ After each reconnect run `reconnect_run.py` writes:
 <base>_reconnect_overlap.png      pixels covered by ≥ 2 IDs
 ```
 
-## Stage 1 Options
+## Stage 1
 
-The full runner currently defaults to `skeleton_decompose.py`, which skeletonizes the full mask and bins centerline pixels by local tangent orientation. Two algorithms keep smoothly-curving filaments together when the angle bins would otherwise fragment them:
-
-- **Adaptive binning**: per-pixel binning runs first. If a single skeleton piece's pixels span only a few cyclically-adjacent bins (a smooth curve crossing one bin boundary), the entire piece is unified to its dominant bin. Pieces that span many non-adjacent bins (genuine sharp turns) keep the per-pixel split. Controlled by `ADAPTIVE_BIN_MAX_SPAN` (default `2`) and `ADAPTIVE_BIN_MIN_FRAC` (default `0.1`).
-- **Smart junction merge**: at each 8-connected junction blob, the tangents of adjacent skeleton arms (walked outward `SMART_JUNCTION_WALK_STEPS` pixels) are compared. A pair is fused if both arms have at least `SMART_JUNCTION_MIN_ARM_PX` pixels and their tangents are anti-parallel with `cos < SMART_JUNCTION_COS_THR`. The whole junction blob is added to the merged piece as a bridge so its connected component physically spans both arms. `SMART_JUNCTION_HANDLE_X` extends the same rule to 4-arm X-crossings.
-
-`run_config.json` records the CONFIG used per run and the resulting counts: `n_smart_junction_merges`, `n_through_junction_pixels`, `n_adaptive_unified_pieces`. Both algorithms are conservative by default; they will not fuse a 90-degree T-arm into a through-bundle. Pass `--no-skeleton-decompose` to use `stringart_tiles.py` instead.
+`1.stringart/stringart_tiles.py` (tiled Hough vectorizer) is the only stage-1 method. An
+experimental skeleton-first alternative (`skeleton_decompose.py`: skeletonize the full mask,
+split at junctions, bin centerline pixels by local tangent orientation, with adaptive
+binning + smart junction merge to keep curves together) was built and tuned over many
+iterations but never beat tiled Hough (best ~0.635 F1 vs tiled's ~0.71-0.735) and was removed
+2026-07-14. Full comparison and root-cause in [Experimentation.md](Experimentation.md).
 
 ## Stringart Acceptance
 
@@ -167,12 +169,6 @@ Key CLI flags:
 | `--reco-trim-dilate-px` | `0` | Halo radius (px) for the trim test |
 | `--um-per-px` | auto | µm/px for scale-factor computation |
 | `--no-scale` | off | Disable pixel-parameter scaling |
-| `--skeleton-decompose` | on | Use skeleton decomposition for stage 1; pass `--no-skeleton-decompose` for tiled Hough stringart |
-| `--smart-junction-merge` | on | Fuse anti-parallel arms at junction blobs in stage 1 |
-| `--smart-junction-cos-thr` | `-0.90` | Cosine threshold for collinear-arm fusion (more negative = stricter) |
-| `--smart-junction-walk-steps` | `10` | Pixels walked outward to estimate each arm's tangent |
-| `--smart-junction-min-arm-px` | `25` | Minimum length each arm must have for fusion |
-| `--smart-junction-handle-x` | on | Also process 4-arm X-crossings (pair-by-pair) |
 | `--adaptive-bin-max-span` | `2` | Max adjacent bins a single piece may span before staying per-pixel |
 | `--adaptive-bin-min-frac` | `0.1` | Fraction-of-dominant threshold for counting a bin as significant |
 | `--angle-step-deg` | `15` | Stringart orientation-bin width; also sets branch count used to scale clear-merge backward layer gap |
