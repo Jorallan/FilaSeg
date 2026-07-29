@@ -648,6 +648,68 @@ reconnect grouping ceiling as bias until the junction-ambiguity problem above is
 
 ---
 
+## `sandbox/` experiment record and promotion (2026-07-29)
+
+`sandbox/` is no longer tracked (`/sandbox/` in `.gitignore`). It had **zero git history** —
+every file in it had always been untracked — so this section is the durable record. The
+experiments themselves are already narrated above; what follows is the inventory, what was
+promoted out, and what is still at risk.
+
+**Do not delete `sandbox/`.** Three findings below are recoverable only by re-running scripts
+that live there.
+
+### Promoted into `eval/` before ignoring
+
+| Promoted to | From | Why it was load-bearing |
+|---|---|---|
+| `eval/synth_thick.py` | `sandbox/synth_thick.py` | Named by `LOCKED_GENERATOR_COMMAND` in the tracked `eval/build_manifest.py`; sole generator of `input/synthetic_thick/` and `input/synthetic_locked_v1/`, which back `fig_width_sweep` and `fig_clean_vs_degraded` — both included in `paper/sections/03_results.tex` |
+| `eval/quant_suite.py` | `sandbox/quant_suite.py` | `run_case()` is the only implementation of five grouping-free network metrics (EDT width, pore/mesh, curvature, coverage, nematic order S); nothing in `eval/` duplicates it |
+
+`build_manifest.py`'s `LOCKED_GENERATOR_COMMAND` string was left **byte-for-byte unchanged** —
+it records the command as actually run, and the file carries an explicit "do not infer or
+replace" instruction. A comment records the new module location next to it.
+
+### Engine mirror status
+
+`sandbox/reconnect/{reconnect_utils_straight,reconnect_run,reconnect_debug}.py` and
+`sandbox/postprocess/post_process_reconnect.py` are **byte-identical** to production
+(verified by hash 2026-07-29). Only the config has drifted:
+`sandbox/reconnect/reconnect_config.yaml` is missing `max_orientation_mismatch_deg`
+entirely and has pre-port `weights.forward` (2.0 vs 3.0), `min_inward_opposition`
+(0.4 vs 0.85) and `max_smooth_rms_px` (5.5 vs 1.4). This is the exact footgun the
+2026-07-07 operational lesson warned about: **resync from `3.reconnect/reconnect_config.yaml`
+before reviving any sandbox workflow**, or rely on `ab_reconnect.py`'s per-run
+`reconnect_config_active.yaml` mechanism.
+
+### Inventory → outcome
+
+| Sandbox file | Outcome | Canonical home |
+|---|---|---|
+| `synth_thick.py` | successful and promoted | `eval/synth_thick.py` |
+| `quant_suite.py` | partially successful, promoted | `eval/quant_suite.py` |
+| `ab_reconnect.py`, `ab_postprocess.py` | retained (dev-loop infrastructure) | none needed — they exist to avoid touching production |
+| `sweep_pipeline.py`, `sweep_postprocess.py`, `sweep_reconnect.py` | retained (sweep infrastructure) | none needed |
+| `run_thick_sweeps.py`, `run_quant_thick.py` | retained (drivers for the above) | none needed |
+| `crossing_metric.py` | successful; conclusion adopted, code not promoted | conclusion in the 2026-06-15 audit section above |
+| `crossing_analysis.py` | successful, never integrated into the manuscript | none — figure exists but is cited only in the archived draft |
+| `phase0_characterize.py` | abandoned (NO-GO, split-recovery exemption) | none — on the don't-retry list |
+| `width_diag.py` | inconclusive — diagnosis complete, no fix ported, never formally closed out | none |
+| `viz_prevent_diffs.py` | inconclusive (visualization aid, no numeric verdict) | none |
+| `reconnect/`, `postprocess/` | mirrors of production | `3.reconnect/`, `4.postprocess/` |
+
+### Still not reproducible from tracked source
+
+- The width / pore / curvature / alignment-S numbers in
+  `eval/quantify_out/quantification_report.md` — only the three pre-existing metrics
+  (orientation 0.94, total length 0.97, junction 0.92–0.98) ever reached this log. Recoverable
+  only by re-running `eval/quant_suite.py`.
+- The crossing-density-vs-coverage result (R² 0.70 vs 0.64) — present in no tracked document;
+  recoverable only by re-running `sandbox/crossing_analysis.py`.
+- `sandbox/width_diag.py`'s three-stage width-inflation breakdown (estimator ~1.3×,
+  `cv2.polylines` LINE_8 rounding ~1.4×, DT +1px boundary) — not duplicated anywhere.
+
+---
+
 ## Don't-retry list (fast lookup)
 
 - Raising `stage_relaxed.max_tip_distance_px` past 50 — re-confirmed harmful twice (June veto,
@@ -682,9 +744,15 @@ reconnect grouping ceiling as bias until the junction-ambiguity problem above is
 ## Where to look for current state
 
 - `eval/README.md` — the metric definition, current experiment-log tables (may be a subset of this
-  doc, kept close to the code), and the "why tiled-Hough wins" section.
+  doc, kept close to the code), and the "why tiled-Hough wins" section. **Stale as of 2026-07-29**:
+  it predates `common_metric.py`, `experiment_runner.py`, `baselines.py`, `build_manifest.py`,
+  `stats_util.py`, `curvature_study.py` and `real_ablation_runner.py`.
+- `docs/EVAL_TESTS_AUDIT.md` — per-file audit of `eval/` and `tests/`: status, what uses what,
+  which scripts are stranded on the retired `output/` layout, and the deletion candidates
+  awaiting review.
 - `sandbox/README.md` — sandbox workflow, the most recent dense-scene / long-bridge investigation
-  narrative, and the `ab_reconnect.py` / `ab_postprocess.py` harness docs.
+  narrative, and the `ab_reconnect.py` / `ab_postprocess.py` harness docs. Note `sandbox/` is
+  untracked; see the sandbox section above before relying on anything in it.
 - `eval/SEM_PLAN.md` — the phased plan for the SEM-evidence step, if picked back up.
 - `repo_summary.md` — architecture/file-layout reference.
 - This file — the historical *why*, so the same experiment isn't re-run for the same negative
