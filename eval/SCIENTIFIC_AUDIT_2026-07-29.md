@@ -254,3 +254,36 @@ support population claims.
    locked set.
 
 This audit is the decision record required before method redesign.
+
+## Development-only redesign follow-up
+
+The requested fragment-source by grouping-kernel factorial was run on the 20
+existing development scenes. It did not read the locked-v1 directory, did not
+tune thresholds, and did not render Stage 4. The four common-fragment F1 means
+were:
+
+| Fragment source | Grouping kernel | Mean F1 | Stratified 95% CI |
+|---|---|---:|---:|
+| Skeleton | Minimum-turn | 0.5004 | [0.4686, 0.5323] |
+| Skeleton | FilaSeg gates | 0.5760 | [0.5465, 0.6107] |
+| Hough plus preprocessing | Minimum-turn | 0.5548 | [0.5252, 0.5875] |
+| Hough plus preprocessing | FilaSeg gates | 0.7164 | [0.6935, 0.7388] |
+
+The source-by-grouper interaction was +0.0860 [0.0458, 0.1256]. The existing
+Hough-plus-FilaSeg combination remained the best cell, so no hybrid redesign was
+selected and no locked-v2 set was opened. Report:
+`output/development_hybrid_grouping_factorial/results.json`, SHA-256
+`CADED26206F59078E6A167F900D44311B030E55ED60E875FEAAE552F883D092E`.
+
+A separate 9-cell development factorial, with four seeded replicates per cell
+(36 scenes total), independently varied summed
+centreline-length density (0.020, 0.040, 0.060 px per px2) and physical bundle
+width (6, 11, 16 px), using four seeds per cell. Within every seed and length
+block, the input mask, clean centreline and overlap-aware centreline ground truth
+were byte-identical across width. Width is therefore a structural Stage-3
+negative control and an active factor only for SEM rendering and Stage 4.
+Achieved thick-mask coverage ranged from 0.121 to 0.635, while crossing density
+rose from 118 to 1126 events per megapixel across the three length-density
+levels. Report:
+`output/development_factorial_density_width/factorial_report.json`, SHA-256
+`30574090DAAE18A4CF437EA4D22718CA60A3A3B3E368B2C59C2381AB43CE8C4A`.

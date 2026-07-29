@@ -96,6 +96,7 @@ from skimage.morphology import skeletonize
 __all__ = [
     "baseline_connected_components",
     "baseline_skeleton_minturn",
+    "minimum_turn_group_fragments",
     "sweep_baseline_b",
     "main",
 ]
@@ -380,6 +381,74 @@ def _match_ends(
         union(ei["bid"], ej["bid"])
 
     return uf
+
+
+def minimum_turn_group_fragments(
+    fragment_masks: Sequence[np.ndarray],
+    max_gap_px: float = 15.0,
+    tangent_window_px: int = 8,
+    max_turn_deg: float = 90.0,
+) -> Dict[int, np.ndarray]:
+    """Group a fixed fragment set without re-extraction or rendering.
+
+    Each supplied mask remains one atomic unit. The returned
+    ``group_id -> bool mask`` mapping contains unions of the original masks,
+    preserving overlapping source fragments until their groups are formed
+    and introducing no bridge or nearest-fill pixels.
+    """
+    masks = [np.asarray(mask, dtype=bool) for mask in fragment_masks]
+    if not masks:
+        return {}
+    shape = masks[0].shape
+    if any(mask.shape != shape for mask in masks):
+        raise ValueError("all fragment masks must have the same shape")
+
+    branches: List[dict] = []
+    w = max(2, int(tangent_window_px))
+    for fragment_id, mask in enumerate(masks, start=1):
+        skel = skeletonize(mask)
+        coords = [tuple(int(v) for v in point) for point in np.argwhere(skel)]
+        if not coords:
+            continue
+        path = _order_piece(set(coords))
+        if len(path) >= 2:
+            sub_a = np.asarray(path[: min(w, len(path))], dtype=float)
+            sub_b = np.asarray(
+                list(reversed(path[-min(w, len(path)):])), dtype=float
+            )
+            ends = [
+                (path[0], _fit_tangent(sub_a)),
+                (path[-1], _fit_tangent(sub_b)),
+            ]
+        else:
+            zero = np.zeros(2, dtype=float)
+            ends = [(path[0], zero), (path[0], zero)]
+        branches.append({
+            "id": fragment_id,
+            "pixels": coords,
+            "ends": ends,
+        })
+
+    if not branches:
+        return {}
+    uf = _match_ends(branches, max_gap_px, max_turn_deg)
+
+    def find(x: int) -> int:
+        while uf[x] != x:
+            uf[x] = uf[uf[x]]
+            x = uf[x]
+        return x
+
+    roots = sorted({find(branch["id"]) for branch in branches})
+    root_to_group = {root: group for group, root in enumerate(roots, start=1)}
+    grouped = {
+        group: np.zeros(shape, dtype=bool)
+        for group in root_to_group.values()
+    }
+    for branch in branches:
+        group = root_to_group[find(branch["id"])]
+        grouped[group] |= masks[branch["id"] - 1]
+    return grouped
 
 
 def baseline_skeleton_minturn(

@@ -32,6 +32,35 @@ def _row(method: str, scene: str, density: int, f1: float, *, status: str = "ok"
     return row
 
 
+def _stat(value: float, n: int = 2):
+    return {
+        "n": n,
+        "mean": value,
+        "sd": .01,
+        "ci_lo": value - .02,
+        "ci_hi": value + .02,
+        "ci_halfwidth": .02,
+    }
+
+
+def _corrected_method(f1: float):
+    return {
+        "precision": _stat(f1 + .1),
+        "recall": _stat(f1 - .1),
+        "f1": _stat(f1),
+        "fragment_recovery_recovery_rate": _stat(f1 + .05),
+    }
+
+
+def _corrected_pair(delta: float):
+    return {
+        "precision": _stat(delta),
+        "recall": _stat(delta),
+        "f1": _stat(delta),
+        "fragment_recovery_recovery_rate": _stat(delta),
+    }
+
+
 @unittest.skipIf(M is None, "paper/figscripts/make_result_macros.py not present "
                             "(manuscript repository not checked out alongside)")
 class ResultMacrosTests(unittest.TestCase):
@@ -62,7 +91,10 @@ class ResultMacrosTests(unittest.TestCase):
             self.assertTrue(commands)
             for command in commands:
                 self.assertRegex(command, r"^[A-Za-z]+$")
-            self.assertIn("Connected components", table)
+            self.assertNotIn("Connected components", table)
+            self.assertNotIn("Failures", table)
+            sanity = (root / "results" / "filaseg_sanity_table.tex").read_text(encoding="utf-8")
+            self.assertIn("Connected components", sanity)
             self.assertTrue((root / "results" / "filaseg_results_summary.json").is_file())
 
     def test_missing_filaseg_is_explicit_not_invented(self):
@@ -74,6 +106,75 @@ class ResultMacrosTests(unittest.TestCase):
             result = M.build_results(root / "locked.json", root / "curve.json", root / "real.json", root / "out")
             self.assertNotIn("LockedFilaSegCommonFOne", result["macros"])
             self.assertNotIn("RealLockedCommonFOne", result["macros"])
+
+    def test_corrected_report_uses_stored_stratified_summaries_and_stage3_headline(self):
+        locked = {"per_scene": [
+            _row("filaseg", "a", 20, .4),
+            _row("baseline_skeleton", "a", 20, .5),
+            _row("baseline_cc", "a", 20, .1),
+        ]}
+        by_method = {
+            "connected_components_centerline": _corrected_method(.1),
+            "minimum_turn_centerline": _corrected_method(.5),
+            "filaseg_stage3_centerline": _corrected_method(.8),
+            "filaseg_stage4_centerline": _corrected_method(.7),
+            "filaseg_stage4_rendered": _corrected_method(.6),
+        }
+        paired = {
+            "primary_filaseg_minus_minimum_turn": _corrected_pair(.3),
+            "primary_filaseg_minus_connected_components": _corrected_pair(.7),
+            "stage4_rendered_minus_stage3_centerline": _corrected_pair(-.2),
+            "stage4_centerline_minus_stage3_centerline": _corrected_pair(-.1),
+            "stage4_rendered_minus_stage4_centerline": _corrected_pair(-.1),
+        }
+        corrected = {
+            "per_scene": [{"geometry_id": "a"}, {"geometry_id": "b"}],
+            "aggregate": {
+                "bootstrap": {"overall_resampling": "within_density_then_scene_weighted_pooling"},
+                "by_method": by_method,
+                "paired": paired,
+                "by_density": {},
+            },
+        }
+        curvature = {"runs": []}
+        real = {"runs": []}
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            for name, data in (
+                ("locked.json", locked),
+                ("corrected.json", corrected),
+                ("curve.json", curvature),
+                ("real.json", real),
+            ):
+                (root / name).write_text(json.dumps(data), encoding="utf-8")
+            result = M.build_results(
+                root / "locked.json",
+                root / "curve.json",
+                root / "real.json",
+                root / "results",
+                representation_json=root / "corrected.json",
+            )
+            self.assertEqual(result["schema_version"], 2)
+            self.assertEqual(result["locked"]["endpoint_source"], "representation_audit_corrected")
+            self.assertEqual(result["macros"]["LockedFilaSegCommonFOneMean"], "0.800")
+            self.assertEqual(
+                result["macros"]["LockedFilaSegStageFourRenderedCommonFOneMean"],
+                "0.600",
+            )
+            self.assertEqual(
+                result["macros"]["FilaSegMinusBaselineSkeletonCommonFOneMean"],
+                "0.300",
+            )
+            self.assertEqual(
+                result["macros"][
+                    "FilaSegStageFourRenderedMinusStageThreeCommonFOneMean"
+                ],
+                "-0.200",
+            )
+            table = (root / "results" / "filaseg_baseline_table.tex").read_text(encoding="utf-8")
+            self.assertIn("FilaSeg (Stage 3 centreline)", table)
+            self.assertIn("Paired difference", table)
+            self.assertNotIn("Connected components", table)
 
 
 if __name__ == "__main__":

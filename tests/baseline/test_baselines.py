@@ -21,6 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from eval.baseline.baselines import (
     baseline_connected_components,
     baseline_skeleton_minturn,
+    minimum_turn_group_fragments,
 )
 
 
@@ -91,6 +92,32 @@ class TestBaselineConnectedComponents(unittest.TestCase):
         lab1 = baseline_connected_components(m1, min_area=15)
         lab2 = baseline_connected_components(m1, min_area=15)
         self.assertTrue(np.array_equal(lab1, lab2))
+
+
+class TestExplicitFragmentMinimumTurn(unittest.TestCase):
+    def test_preserves_support_and_groups_gap(self):
+        shape = (80, 100)
+        left = _thick_line(shape, 40, 5, 40, 42, width=1)
+        right = _thick_line(shape, 40, 49, 40, 94, width=1)
+        groups = minimum_turn_group_fragments(
+            [left, right], max_gap_px=15.0, max_turn_deg=45.0
+        )
+        self.assertEqual(len(groups), 1)
+        only = next(iter(groups.values()))
+        self.assertTrue(np.array_equal(only, left | right))
+        self.assertFalse(only[40, 45], "grouping must not render a bridge")
+
+    def test_keeps_overlapping_inputs_distinct(self):
+        shape = (80, 80)
+        horizontal = _thick_line(shape, 40, 5, 40, 74, width=1)
+        vertical = _thick_line(shape, 5, 40, 74, 40, width=1)
+        groups = minimum_turn_group_fragments(
+            [horizontal, vertical], max_gap_px=2.0, max_turn_deg=30.0
+        )
+        self.assertEqual(len(groups), 2)
+        supports = list(groups.values())
+        self.assertTrue(any(np.array_equal(mask, horizontal) for mask in supports))
+        self.assertTrue(any(np.array_equal(mask, vertical) for mask in supports))
 
 
 class TestBaselineSkeletonMinturn(unittest.TestCase):

@@ -51,6 +51,26 @@ $PY = "C:\Repos\venv_cnt\Scripts\python.exe"
 & $PY eval\eval_reconnect.py --run output\full_pipeline\<base> --gt gt.tif --out report.json
 ```
 
+## Development-only hybrid grouping factorial
+
+`studies/hybrid_grouping_factorial.py` runs the predeclared 2x2
+fragment-source by grouping-kernel study on the 20 `synthetic_thick`
+development scenes. It compares input-skeleton versus stored Stage-2 Hough
+fragments under minimum-turn versus FilaSeg staged grouping. Every cell is
+scored on the same input-derived common fragments, uses singleton treatment
+for GT-unassigned fragments, and uses a density-stratified paired block
+bootstrap. Stage-4 rendering and overlap suppression are absent.
+
+```powershell
+& $PY eval\studies\hybrid_grouping_factorial.py
+```
+
+The default report is
+`output/development_hybrid_grouping_factorial/results.json`. The command
+refuses locked-evaluation paths and refuses to overwrite an existing study
+directory. It is exploratory development evidence only; adopting a method
+change requires a separately frozen method and fresh locked-v2 evaluation.
+
 ## Ground-truth formats
 
 **Label image** (`.tif`/`.png`, single channel): `0` = background, `>0` =
@@ -332,3 +352,25 @@ Measurement foundation complete; tuning exhausted and validated on real +
 synthetic. The one remaining lever is **SEM-bridge evidence** to bridge real
 mask gaps / reject crossings — the universal bottleneck. Plan in
 [SEM_PLAN.md](SEM_PLAN.md).
+
+## Development-only density-by-width factorial study
+
+`generators/synth_factorial.py` independently varies summed centreline length
+density and physical bundle width. The default 3 by 3 grid uses length densities
+0.020, 0.040, and 0.060 px per px squared, width centres 6, 11, and 16 px, and
+four development seeds. Within each seed and length-density block, the degraded
+one-pixel input, clean centreline, and overlap-aware centreline ground truth are
+byte-identical across width cells. Width is therefore a negative control for
+Stage-3 grouping and an active factor only for thick Stage-4 rendering.
+
+```powershell
+python eval/generators/synth_factorial.py
+python eval/studies/factorial_density_width.py
+```
+
+The commands write only under
+`output/development_factorial_density_width/`. Both programs reject paths that
+contain `synthetic_locked_v1`. The report records achieved thick coverage,
+one-pixel coverage, crossing density, filament count, and measured gap
+statistics. These data are exploratory development evidence and must not be
+combined with the existing locked evaluation.
