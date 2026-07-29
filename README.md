@@ -31,9 +31,41 @@ Tools/
 
 4.postprocess/
   post_process_reconnect.py     Smooths/thickens reconnect labels and exports previews.
+
+eval/
+  common_metric.py              Shared instance-matching metric used by every evaluation.
+  metrics.py, stats_util.py     Metric helpers and bootstrap statistics.
+  baselines.py                  Baseline methods compared against the pipeline.
+  synth_generator.py            Synthetic ground-truth scene generator.
+  experiment_runner.py          Batch experiment driver.
+  build_manifest.py             Builds the evaluation manifest.
+  README.md                     Evaluation methodology; see also docs/EVAL_TESTS_AUDIT.md.
+
+tests/
+  test_*.py                     unittest suite covering the evaluation code.
+
+docs/
+  generate_*.py, build_*.py     Generators for the pipeline documentation assets.
+  pipeline_overview.md          Written pipeline walkthrough.
+  EVAL_TESTS_AUDIT.md           Per-file audit of eval/ and tests/.
 ```
 
 Generated pipeline artifacts are written under `output/full_pipeline/` and are ignored by git.
+The manuscript lives in a separate repository
+([Paper---FilaSeg-...](https://github.com/Jorallan/Paper---FilaSeg-Geometry-Driven-Instance-Extraction-of-thin-filaments));
+the local `paper/` working folder and the exploratory `sandbox/` folder are not tracked here.
+
+## Tests
+
+The suite uses `unittest` (not pytest) and must be run from the repository root:
+
+```powershell
+C:\Repos\venv_cnt\Scripts\python.exe -m unittest discover -s tests -t tests -p "test_*.py"
+```
+
+This runs 59 tests. Note `-t tests`: there is no `tests/__init__.py`, so `-t .` fails with
+"Start directory is not importable". Individual files can also be run directly, e.g.
+`python tests\test_common_metric.py`.
 
 ## End-To-End Pipeline
 
@@ -150,3 +182,18 @@ python 1.stringart\stringart_tiles.py `
 ## Environment Notes
 
 The active stage scripts need the scientific Python stack used in `venv_cnt`: `numpy`, `scipy`, `scikit-image`, `opencv-python`, `matplotlib`, `pyyaml`, and `tifffile`.
+
+## Licence And Attribution
+
+This project is released under the MIT Licence. The full licence text, including the
+upstream copyright notice, is in [LICENSE](LICENSE) — that file is authoritative and this
+section is descriptive only.
+
+FilaSeg is derived from the original work by VimsLab:
+
+- Upstream repository: <https://github.com/VimsLab/filaments_quantification>
+- Copyright (c) 2021 VimsLab, also released under the MIT Licence.
+
+The upstream copyright notice and MIT attribution are retained in `LICENSE` and must be
+preserved in any redistribution. Upstream developers are contributors to the original
+codebase and are not authors of the FilaSeg manuscript.

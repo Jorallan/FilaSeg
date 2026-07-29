@@ -1,35 +1,62 @@
-# Python
+# =============================================================================
+# FilaSeg - coding repository .gitignore
+#
+# Policy: track source, configuration, evaluation methodology and tests.
+# Ignore generated data, generated documentation assets, the manuscript
+# working folder, and the sandbox experiment area.
+# =============================================================================
+
+# --- Python -----------------------------------------------------------------
 __pycache__/
-*.pyc
-*.pyo
+*.py[cod]
 *.pyd
-*.egg-info/
 *.egg
+*.egg-info/
 dist/
 build/
 .eggs/
+
+# --- Virtual environments ---------------------------------------------------
 venv/
 .venv/
 env/
 
-# IDE / editor
-.vs/
-.vscode/
-.claude/
-*.swp
-*.swo
-.DS_Store
-Thumbs.db
-_tmp
-docs
-
-# Jupyter
+# --- Test / type / lint caches ----------------------------------------------
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
 .ipynb_checkpoints/
 
-# OS
+# --- IDE / editor / OS ------------------------------------------------------
+.vs/
+.vscode/
+.idea/
+.claude/
+.DS_Store
+Thumbs.db
 desktop.ini
+*.swp
+*.swo
+*.tmp
+*.bak
+*~
+_tmp
 
-# Data folders - inputs, outputs, analysis results
+# --- Agent scratch ----------------------------------------------------------
+.codex_tmp_render/
+
+# --- Manuscript -------------------------------------------------------------
+# The manuscript lives in its own repository:
+#   https://github.com/Jorallan/Paper---FilaSeg-Geometry-Driven-Instance-Extraction-of-thin-filaments
+# paper/ is the local working copy and is deliberately not tracked here.
+/paper/
+
+# --- Sandbox ----------------------------------------------------------------
+# Exploratory experiment area. Engine code here is a mirror of production
+# (3.reconnect/, 4.postprocess/); outcomes are recorded in Experimentation.md.
+/sandbox/
+
+# --- Data folders: inputs, outputs, analysis results ------------------------
 output/
 input/
 1.stringart/input/
@@ -39,4 +66,15 @@ input/
 3.reconnect/output/
 3.reconnect/analysis/
 4.postprocess/output/
-sem_full_00000_1p66_crop512_manual
+sem_full_00000_1p66_crop512_manual/
+
+# --- docs/ ------------------------------------------------------------------
+# Track the generator scripts and written documentation; ignore the ~30 MB of
+# generated presentation and figure assets they produce.
+docs/**/*.png
+docs/**/*.gif
+docs/**/*.jpg
+docs/**/*.jpeg
+docs/**/*.pptx
+docs/**/*.html
+docs/**/*.pdf
