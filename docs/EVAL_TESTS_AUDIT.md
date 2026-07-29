@@ -31,6 +31,32 @@ now explicitly ignored (see `.gitignore`). This audit is the commit that first b
 5. **No deletions were performed.** Section [Deletion candidates](#deletion-candidates-awaiting-review)
    lists what a reviewer should decide on; nothing there has been acted upon.
 
+
+## Layout after the 2026-07-29 reorganisation
+
+`eval/` modules are still imported by bare name; `eval/_evalpath.py` puts every
+code subdirectory back on `sys.path`, so `import instance_io` keeps working from
+tests, sandbox tooling and the paper figure scripts. Subdirectory names avoid
+colliding with stdlib modules (`statistics`) and with module names (`baselines`).
+
+```text
+eval/
+├── _evalpath.py            import shim
+├── core/                 common_metric.py, instance_io.py, metrics.py
+├── baseline/             baselines.py
+├── runners/              curvature_study.py, eval_reconnect.py, experiment_runner.py, real_ablation_runner.py, run_batch.py
+├── stats/                stats_util.py
+├── generators/           synth_generator.py, synth_thick.py
+├── manifests/            build_manifest.py
+├── diagnostics/          diagnose_connections.py, id_audit.py, sem_features.py, sem_phase0.py
+├── studies/              error_table.py, length_analysis.py, orient_method.py, quant_suite.py, quantify_compare.py
+└── results/                audit_out/, error_table_out/, quantify_out/
+```
+
+`tests/` mirrors it: `core/`, `baseline/`, `runners/`, `stats/`, `manifests/`,
+and `pipeline/` for the three tests that target code outside `eval/`.
+Run with `python -m unittest discover -s tests -t tests -p "test_*.py"`.
+
 ## Status vocabulary
 
 `canonical` · `supporting` · `test-only` · `superseded` · `duplicate` · `obsolete` ·
@@ -40,19 +66,19 @@ now explicitly ignored (see `.gitignore`). This audit is the commit that first b
 
 | File | Purpose | Used by | Status | Recommended action | Risk | Validation required |
 |---|---|---|---|---|---|---|
-| `common_metric.py` | Method-independent fragment-clustering + instance-recovery scoring built from the input mask alone, so FilaSeg and baselines share identical atomic units | `experiment_runner.py`, `curvature_study.py`, `real_ablation_runner.py`, `paper/figscripts/{fig_development_sensitivity,fig_locked_results,make_result_macros}.py`; frozen SHA-256 in `paper/EVALUATION_LOCK.md` | canonical | none | low | `tests/test_common_metric.py` |
-| `experiment_runner.py` | Reproducible scene-paired evaluator; runs baselines and/or the pipeline CLI unmodified and scores every row including failures | Primary command in `paper/REPRODUCIBILITY.md`; frozen hash in lock docs | canonical | none | low | `tests/test_experiment_runner.py` |
-| `baselines.py` | Mask-only comparison methods (connected components; skeleton min-turn continuation) | `experiment_runner.py`; frozen hash in lock docs | canonical | none | low | `tests/test_baselines.py` |
-| `stats_util.py` | Scene-level bootstrap CIs and paired-difference summaries | `curvature_study.py`, `experiment_runner.py`, 3 `paper/figscripts/*`; frozen hash | canonical | none | low | `tests/test_stats_util.py` |
-| `build_manifest.py` | Builds `paper/evaluation_manifest.csv` from runner JSON reports, non-selectively (keeps failed rows) | Invoked in `paper/REPRODUCIBILITY.md` | canonical | none | low | `tests/test_build_manifest.py` |
-| `curvature_study.py` | Orchestrates the reconnect curvature / q-fit study over `input/synthetic_thick` (refuses the locked set by design) | `real_ablation_runner.py` imports helpers; output `curvature_study.json` is a required paper artifact | canonical | none — "development-only" in its docstring scopes the *dataset*, not the tool's importance | low | `tests/test_curvature_study.py` |
-| `real_ablation_runner.py` | Real-crop ablations (content-adaptation-off, single-tile-grid, fixed-render-width, orientation-gate-off) under one frozen reconnect config | Feeds `real_ablation_results.json`, a required paper artifact | canonical | none | low | `tests/test_real_ablation_runner.py` (guards the `VARIANTS` table only, not execution) |
-| `instance_io.py` | Single source of truth for loading predicted instances / GT / fragments across formats (multilabel npz, label tif, centerline JSON) | Imported by ~14 `eval/*.py`, `paper/figscripts/fig_reconnect_examples.py`, and most `sandbox/*.py` | canonical | none | low | no dedicated test; exercised indirectly by most others |
-| `metrics.py` | Fragment-clustering + panoptic-quality engine (native/legacy metric family) | `eval_reconnect.py`, `diagnose_connections.py`, `error_table.py`, `id_audit.py`, `length_analysis.py`, `run_batch.py`; `Tools/troubleshoot_reconnect.py` | canonical | none — **not** a duplicate of `common_metric.py` | low | indirectly via `tests/test_common_metric.py` case 6; no dedicated test |
+| `common_metric.py` | Method-independent fragment-clustering + instance-recovery scoring built from the input mask alone, so FilaSeg and baselines share identical atomic units | `experiment_runner.py`, `curvature_study.py`, `real_ablation_runner.py`, `paper/scripts/ (figures/ and results/)`; frozen SHA-256 in `paper/EVALUATION_LOCK.md` | canonical | none | low | `tests/core/test_common_metric.py` |
+| `experiment_runner.py` | Reproducible scene-paired evaluator; runs baselines and/or the pipeline CLI unmodified and scores every row including failures | Primary command in `paper/docs/REPRODUCIBILITY.md`; frozen hash in lock docs | canonical | none | low | `tests/runners/test_experiment_runner.py` |
+| `baselines.py` | Mask-only comparison methods (connected components; skeleton min-turn continuation) | `experiment_runner.py`; frozen hash in lock docs | canonical | none | low | `tests/baseline/test_baselines.py` |
+| `stats_util.py` | Scene-level bootstrap CIs and paired-difference summaries | `curvature_study.py`, `experiment_runner.py`, 3 scripts under `paper/scripts/`; frozen hash | canonical | none | low | `tests/stats/test_stats_util.py` |
+| `build_manifest.py` | Builds `paper/reproducibility/evaluation_manifest.csv` from runner JSON reports, non-selectively (keeps failed rows) | Invoked in `paper/docs/REPRODUCIBILITY.md` | canonical | none | low | `tests/manifests/test_build_manifest.py` |
+| `curvature_study.py` | Orchestrates the reconnect curvature / q-fit study over `input/synthetic_thick` (refuses the locked set by design) | `real_ablation_runner.py` imports helpers; output `curvature_study.json` is a required paper artifact | canonical | none — "development-only" in its docstring scopes the *dataset*, not the tool's importance | low | `tests/runners/test_curvature_study.py` |
+| `real_ablation_runner.py` | Real-crop ablations (content-adaptation-off, single-tile-grid, fixed-render-width, orientation-gate-off) under one frozen reconnect config | Feeds `real_ablation_results.json`, a required paper artifact | canonical | none | low | `tests/runners/test_real_ablation_runner.py` (guards the `VARIANTS` table only, not execution) |
+| `instance_io.py` | Single source of truth for loading predicted instances / GT / fragments across formats (multilabel npz, label tif, centerline JSON) | Imported by ~14 `eval/*.py`, `paper/scripts/figures/fig_reconnect_examples.py`, and most `sandbox/*.py` | canonical | none | low | no dedicated test; exercised indirectly by most others |
+| `metrics.py` | Fragment-clustering + panoptic-quality engine (native/legacy metric family) | `eval_reconnect.py`, `diagnose_connections.py`, `error_table.py`, `id_audit.py`, `length_analysis.py`, `run_batch.py`; `Tools/troubleshoot_reconnect.py` | canonical | none — **not** a duplicate of `common_metric.py` | low | indirectly via `tests/core/test_common_metric.py` case 6; no dedicated test |
 | `synth_generator.py` | Scale-aware synthetic filament + SEM + GT generator with content-correlated mask degradation | Imported as a library by `eval/synth_thick.py`; documented in `eval/README.md`, `Experimentation.md`, `paper/TUNING_PROVENANCE.md` | canonical | none — **not** superseded by `synth_thick.py`, which extends it | low | covered via the regeneration check in `paper/EVALUATION_LOCK.md` |
 | `synth_thick.py` | Thick-bundle / thin-axis generator; produces `input/synthetic_thick/` and the locked set | Named by `LOCKED_GENERATOR_COMMAND` in `build_manifest.py`; backs `fig_width_sweep` + `fig_clean_vs_degraded` in the manuscript | canonical | **promoted from `sandbox/` 2026-07-29** | low | `--help` verified post-promotion; no unit test |
 | `quant_suite.py` | Grouping-free network quantification (EDT width, pore/mesh, curvature, coverage, nematic order S) | `run_case()` reused by the thick-bundle quantification driver; no equivalent in `eval/` | supporting | **promoted from `sandbox/` 2026-07-29**; its default `CASES` list is stale (see note 2) | low | import + `run_case` presence verified post-promotion |
-| `eval_reconnect.py` | Single-run eval CLI (`--describe`, `--run --gt`, `--out`) plus a `--selftest` synthetic validator | `paper/REAL_CROP_FACTS.md` re-derives the manuscript's real-crop numbers with it; primary usage doc in `eval/README.md` | supporting | none — still the tool that reproduces the headline real-crop F1 | low | its own `--selftest`; no `tests/` file targets it |
+| `eval_reconnect.py` | Single-run eval CLI (`--describe`, `--run --gt`, `--out`) plus a `--selftest` synthetic validator | `paper/REAL_CROP_FACTS.md` (local-only) re-derives the manuscript's real-crop numbers with it; primary usage doc in `eval/README.md` | supporting | none — still the tool that reproduces the headline real-crop F1 | low | its own `--selftest`; no `tests/` file targets it |
 | `diagnose_connections.py` | Root-cause attribution of missed/wrong reconnect joins (overlap-aware tip-to-GT lookup) | `eval/id_audit.py`, `sandbox/ab_reconnect.py`, `sandbox/phase0_characterize.py` | supporting | none | low | no tests; generic `--run`/`--gt` CLI, not path-stranded |
 | `run_batch.py` | Older-generation batch driver: generate/run/eval/aggregate to CSV | Documented in `eval/README.md`, `Experimentation.md`; subprocess-invoked by `sandbox/run_thick_sweeps.py`; included in `experiment_runner.py`'s provenance hash set | supporting — superseded *for the locked/paper role* by `experiment_runner.py`, still the active driver for sweep tooling | keep; consider the hardcoded interpreter path (below) if portability matters | low | no tests |
 | `sem_features.py` | Shared SEM bridge-evidence feature sampling (intensity continuity across a candidate gap) | `eval/sem_phase0.py`; documented in `eval/SEM_PLAN.md` | supporting | none | low | no tests; pure numeric helper |
@@ -62,7 +88,7 @@ now explicitly ignored (see `.gitignore`). This audit is the commit that first b
 | `quantify_compare.py` | Downstream-sufficiency check: do count/length/orientation/width match GT despite grouping errors? | Nothing imports it; it is the confirmed generator of `quantify_out/*_quant.png` | one-off development utility | **decide** — stranded on missing paths | low | unresolved |
 | `orient_method.py` | Hypothesis test: is per-instance orientation overlap corrupted by grouping errors vs a grouping-independent per-pixel tangent measure? | Only a prose mention in `quant_suite.py` | one-off development utility | **decide** — stranded; also defines `OUT = eval/quantify_out` but never writes there (dead constant) | low | unresolved |
 | `length_analysis.py` | One-time study of per-filament length short-bias across three groupings | **Zero references anywhere in the repo**, not even by filename in `Experimentation.md` | one-off development utility | **decide** — strongest orphan candidate | low | unresolved |
-| `README.md` | Metric explanation, usage, ~25-run experiment log (entries to 2026-07-14) | Linked from `repo_summary.md` | supporting | **stale** — does not mention `common_metric.py`, `experiment_runner.py`, `baselines.py`, `build_manifest.py`, `stats_util.py`, `curvature_study.py` or `real_ablation_runner.py`, i.e. the entire current locked pipeline | low (docs only) | read-through against `paper/REPRODUCIBILITY.md` |
+| `README.md` | Metric explanation, usage, ~25-run experiment log (entries to 2026-07-14) | Linked from `repo_summary.md` | supporting | **stale** — does not mention `common_metric.py`, `experiment_runner.py`, `baselines.py`, `build_manifest.py`, `stats_util.py`, `curvature_study.py` or `real_ablation_runner.py`, i.e. the entire current locked pipeline | low (docs only) | read-through against `paper/docs/REPRODUCIBILITY.md` |
 | `SEM_PLAN.md` | Design plan for a not-yet-built SEM-evidence reconnect stage | Linked from `eval/README.md`; discussed in `Experimentation.md` | supporting | keep | none | unresolved whether SEM work is still on the roadmap |
 
 ## `tests/`
@@ -80,12 +106,12 @@ broader than an eval-only suite.
 | `test_stats_util.py` | `eval/stats_util.py` | canonical | 4 tests |
 | `test_build_manifest.py` | `eval/build_manifest.py` | canonical | 3 tests |
 | `test_curvature.py` | `3.reconnect/reconnect_utils_straight.py` | canonical | 8 tests; uses `importlib` because the package dir starts with a digit. **Not** an `eval/` test |
-| `test_result_macros.py` | `paper/figscripts/make_result_macros.py` | canonical | 2 tests; **not** an `eval/` test. Amended 2026-07-29 to skip cleanly when `paper/` is absent — see below |
+| `test_result_macros.py` | `paper/scripts/results/make_result_macros.py` | canonical | 2 tests; **not** an `eval/` test. Amended 2026-07-29 to skip cleanly when `paper/` is absent — see below |
 | `test_real_ablation_runner.py` | `eval/real_ablation_runner.py` | canonical | 2 tests; guards the `VARIANTS` table only, not execution |
 
 ### Cross-repository coupling (fixed)
 
-`tests/test_result_macros.py` imported `paper/figscripts/make_result_macros.py` at module
+`tests/pipeline/test_result_macros.py` imported `paper/scripts/results/make_result_macros.py` at module
 scope. Because `paper/` is a local working copy of a *separate* repository and is not
 tracked here, a fresh clone of the coding repository could not run its own test suite — the
 import raised before any test executed. The import is now guarded and the test class is
@@ -118,8 +144,8 @@ retained as evidence of results already reported, not as reproducible artifacts.
 
 - `eval/run_batch.py:42` — `VENV_PY = Path(r"C:\Repos\venv_cnt\Scripts\python.exe")`, used as
   the subprocess interpreter, with a `sys.executable` fallback at line 49. **Runtime code.**
-- Documentation only: `eval/README.md:42`; docstrings in `tests/test_baselines.py`,
-  `tests/test_common_metric.py`, `tests/test_curvature.py`.
+- Documentation only: `eval/README.md:42`; docstrings in `tests/baseline/test_baselines.py`,
+  `tests/core/test_common_metric.py`, `tests/pipeline/test_curvature.py`.
 
 The newer canonical drivers (`experiment_runner.py`, `curvature_study.py`,
 `real_ablation_runner.py`) default to `sys.executable` and are portable. No `/Users/`-style
