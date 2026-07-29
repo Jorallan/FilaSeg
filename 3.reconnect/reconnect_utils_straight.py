@@ -29,6 +29,7 @@ _LOG_COLUMNS = [
     "reason",
     "dist", "forward_base", "forward_tar", "inward_opposition",
     "width_ratio", "line_resid", "arc_miss_frac", "curv_delta",
+    "curvature_measure", "q_fit",
     "intrusion_frac", "smooth_rms", "max_turn_deg",
     "intrusion_components",
     "base_tip_count", "tar_tip_count", "layer_gap",
@@ -286,6 +287,7 @@ def _fit_local_tangent_and_curvature(trace_rc: np.ndarray, fit_points: int) -> T
         "axis_xy": np.asarray([1.0, 0.0], dtype=np.float32),
         "normal_xy": np.asarray([0.0, 1.0], dtype=np.float32),
         "tip_xy": np.asarray([0.0, 0.0], dtype=np.float32),
+        "q_fit": 0.0, "legacy_mixed_curvature": 0.0,
     }
     if trace_rc is None or len(trace_rc) == 0:
         return _z2.copy(), 0.0, _empty_extra
@@ -322,31 +324,53 @@ def _fit_local_tangent_and_curvature(trace_rc: np.ndarray, fit_points: int) -> T
     n = rel @ normal_xy
 
     deg = 2 if len(su) >= 5 and np.unique(np.round(su, 4)).size >= 3 else 1
-    a_coeff, b_coeff, curvature = 0.0, 0.0, 0.0
+    a_coeff, b_coeff, curvature, q_fit = 0.0, 0.0, 0.0, 0.0
+    legacy_mixed_curvature = 0.0
     try:
         coeff = np.polyfit(su, n, deg=deg)
         pred = np.polyval(coeff, su)
         if deg == 2:
             a_coeff = float(coeff[0])
             b_coeff = float(coeff[1])
-            curvature = abs(2.0 * a_coeff) / (span * span + 1e-9)
         else:
             b_coeff = float(coeff[0])
         rms = float(np.sqrt(np.mean((n - pred) ** 2)))
-        curvature += 0.10 * rms / (span + 1e-9)
+        # Dimensionless fit-quality measure (roughness relative to arc length);
+        # kept SEPARATE from curvature (see module-level note above the caller).
+        q_fit = rms / (span + 1e-9)
+        # Retained only as a development-study comparator. This historical
+        # expression is dimensionally inconsistent because q_fit is
+        # dimensionless while the first term has units px^-1. It must never be
+        # the locked production choice.
+        legacy_mixed_curvature = (
+            abs(2.0 * a_coeff) / (span * span + 1e-9) + 0.10 * q_fit
+            if deg == 2 else 0.10 * q_fit
+        )
 
+        # dn/d(su) at the tip; used both to reorient the tangent and, converted
+        # to physical units (divide by span), as the slope term of the curvature.
         dn_dsu_tip = 2.0 * a_coeff * su_tip + b_coeff
+        if deg == 2:
+            b_eff = dn_dsu_tip  # dn/ds at the tip, expressed in normalized-su units
+            curvature = (abs(2.0 * a_coeff) / (span * span + 1e-9)) / (
+                (1.0 + (b_eff / (span + 1e-9)) ** 2) ** 1.5
+            )
+        else:
+            curvature = 0.0
+
         tangent_xy_poly = axis_xy + (dn_dsu_tip / span) * normal_xy
         nt_poly = float(np.linalg.norm(tangent_xy_poly))
         if nt_poly > 1e-9:
             tangent_xy_poly /= nt_poly
             tangent_rc = np.asarray([tangent_xy_poly[1], tangent_xy_poly[0]], dtype=np.float32)
     except Exception:
-        a_coeff, b_coeff, curvature = 0.0, 0.0, 0.0
+        a_coeff, b_coeff, curvature, q_fit = 0.0, 0.0, 0.0, 0.0
+        legacy_mixed_curvature = 0.0
 
     extra: dict = {
         "a": a_coeff, "b": b_coeff, "su_tip": su_tip, "span": span,
         "axis_xy": axis_xy.copy(), "normal_xy": normal_xy.copy(), "tip_xy": xy[0].copy(),
+        "q_fit": q_fit, "legacy_mixed_curvature": legacy_mixed_curvature,
     }
     return tangent_rc.astype(np.float32), float(curvature), extra
 
@@ -477,7 +501,8 @@ def _enumerate_tip_geoms(
         dvec, curv, extra = _fit_local_tangent_and_curvature(trace, fit_points)
         tip_items.append({
             "point": p, "trace": trace, "dir": dvec,
-            "curv": float(curv), "support": float(_tip_trace_length(trace)), "extra": extra,
+            "curv": float(curv), "q_fit": float(extra.get("q_fit", 0.0)),
+            "support": float(_tip_trace_length(trace)), "extra": extra,
         })
 
     if not tip_items:
@@ -520,6 +545,8 @@ class Component:
     rd: Optional[np.ndarray] = None
     lcurv: float = 0.0
     rcurv: float = 0.0
+    lqfit: float = 0.0
+    rqfit: float = 0.0
     skel_len: float = 0.0
     mean_width: float = 0.0
     bbox: Tuple[int, int, int, int] = (0, -1, 0, -1)
@@ -555,21 +582,25 @@ class Component:
             self.lt, self.ltrace = t0["point"], t0["trace"]
             self.ld = np.asarray(t0["dir"], dtype=np.float32)
             self.lcurv = float(t0["curv"])
+            self.lqfit = float(t0.get("q_fit", 0.0))
         else:
             self.lt = (0, 0)
             self.ltrace = np.asarray([[0.0, 0.0]], dtype=np.float32)
             self.ld = np.asarray([0.0, 0.0], dtype=np.float32)
             self.lcurv = 0.0
+            self.lqfit = 0.0
 
         if len(names) >= 2:
             t1 = self.tips[names[1]]
             self.rt, self.rtrace = t1["point"], t1["trace"]
             self.rd = np.asarray(t1["dir"], dtype=np.float32)
             self.rcurv = float(t1["curv"])
+            self.rqfit = float(t1.get("q_fit", 0.0))
         else:
             self.rt, self.rtrace = self.lt, self.ltrace
             self.rd = self.ld.copy()
             self.rcurv = float(self.lcurv)
+            self.rqfit = float(self.lqfit)
 
         self.skel_len = float(max(1, np.count_nonzero(self.skel)))
         self.mean_width = float(max(1.0, float(np.count_nonzero(self.mask)) / self.skel_len))
@@ -983,7 +1014,7 @@ def _evaluate_contact_pair(
     )
 
 
-def _tip_data(comp: Component, name: str) -> Tuple[Coord, np.ndarray, float, np.ndarray]:
+def _tip_data(comp: Component, name: str) -> Tuple[Coord, np.ndarray, float, np.ndarray, float]:
     if isinstance(getattr(comp, "tips", None), dict) and name in comp.tips:
         t = comp.tips[name]
         return (
@@ -991,10 +1022,11 @@ def _tip_data(comp: Component, name: str) -> Tuple[Coord, np.ndarray, float, np.
             np.asarray(t["dir"], dtype=np.float32),
             float(t["curv"]),
             np.asarray(t["trace"], dtype=np.float32),
+            float(t.get("q_fit", 0.0)),
         )
     if name == "l":
-        return comp.lt, comp.ld, float(comp.lcurv), comp.ltrace
-    return comp.rt, comp.rd, float(comp.rcurv), comp.rtrace
+        return comp.lt, comp.ld, float(comp.lcurv), comp.ltrace, float(getattr(comp, "lqfit", 0.0))
+    return comp.rt, comp.rd, float(comp.rcurv), comp.rtrace, float(getattr(comp, "rqfit", 0.0))
 
 
 def _sample_hermite_bridge(
@@ -1084,7 +1116,17 @@ def _local_smoothness_metrics(
         coeff = np.polyfit(su, n, deg=deg)
         pred = np.polyval(coeff, su)
         rms = float(np.sqrt(np.mean((n - pred) ** 2)))
-        curv = abs(2.0 * float(coeff[0])) / (span * span + 1e-9) if deg == 2 else 0.0
+        if deg == 2:
+            a_coeff = float(coeff[0])
+            b_coeff = float(coeff[1])
+            # dn/d(su) at the trace midpoint (su=0.5); converted to physical
+            # units (divide by span) for the slope term of the curvature.
+            b_eff = 2.0 * a_coeff * 0.5 + b_coeff
+            curv = (abs(2.0 * a_coeff) / (span * span + 1e-9)) / (
+                (1.0 + (b_eff / (span + 1e-9)) ** 2) ** 1.5
+            )
+        else:
+            curv = 0.0
     except Exception:
         rms, curv = 1e9, 1e9
 
@@ -1103,8 +1145,8 @@ def _evaluate_tip_pair(
         (cfg.get("reconnect_repair", {}) or {}).get("enabled", False)
     )
 
-    bp, bd, bcurv, btrace = _tip_data(base, base_tip_name)
-    tp, td, tcurv, ttrace = _tip_data(tar, tar_tip_name)
+    bp, bd, bcurv, btrace, bqfit = _tip_data(base, base_tip_name)
+    tp, td, tcurv, ttrace, tqfit = _tip_data(tar, tar_tip_name)
 
     rec: Dict = {
         "base_id": int(base.id), "tar_id": int(tar.id),
@@ -1138,7 +1180,20 @@ def _evaluate_tip_pair(
     forward_tar       = float(cosine(td, u))
     width_ratio       = float(max(base.mean_width, tar.mean_width) / max(1e-6, min(base.mean_width, tar.mean_width)))
     line_resid        = 0.5 * (_perp_distance_point_to_line(tp, bp, -bd) + _perp_distance_point_to_line(bp, tp, td))
-    curv_delta        = float(abs(bcurv - tcurv))
+    curvature_measure = str(thr.get("curvature_measure", "geometric")).strip().lower()
+    if curvature_measure == "geometric":
+        curv_delta = float(abs(bcurv - tcurv))
+    elif curvature_measure == "legacy_mixed":
+        b_extra = (base.tips or {}).get(base_tip_name, {}).get("extra", {})
+        t_extra = (tar.tips or {}).get(tar_tip_name, {}).get("extra", {})
+        b_legacy = float(b_extra.get("legacy_mixed_curvature", bcurv))
+        t_legacy = float(t_extra.get("legacy_mixed_curvature", tcurv))
+        curv_delta = float(abs(b_legacy - t_legacy))
+    else:
+        raise ValueError(
+            f"unsupported curvature_measure={curvature_measure!r}; "
+            "expected 'geometric' or development-only 'legacy_mixed'"
+        )
     raw_layer_gap     = abs(int(base.layer) - int(tar.layer))
     layer_count       = int(cfg.get("_orientation_layer_count", 0) or 0)
     layer_gap         = min(raw_layer_gap, layer_count - raw_layer_gap) if layer_count > 1 else raw_layer_gap
@@ -1147,6 +1202,7 @@ def _evaluate_tip_pair(
         "forward_base": forward_base, "forward_tar": forward_tar,
         "inward_opposition": inward_opposition, "width_ratio": width_ratio,
         "line_resid": line_resid, "curv_delta": curv_delta,
+        "curvature_measure": curvature_measure,
         "base_tip_count": int(len(base.tips or {})),
         "tar_tip_count": int(len(tar.tips or {})),
         "layer_gap": int(layer_gap),
@@ -1247,6 +1303,12 @@ def _evaluate_tip_pair(
         return reject("line_residual")
     if curv_delta > float(thr.get("max_curvature_delta", 0.15)):
         return reject("curv_delta")
+
+    q_fit_max_pair = float(max(bqfit, tqfit))
+    rec["q_fit"] = q_fit_max_pair
+    q_fit_max = float(thr.get("max_tip_fit_quality", 0.0))
+    if q_fit_max > 0.0 and q_fit_max_pair > q_fit_max:
+        return reject("tip_fit_quality")
 
     max_arc_miss_frac = float(thr.get("max_arc_miss_frac", 1.0))
     arc_miss_frac_val = -1.0

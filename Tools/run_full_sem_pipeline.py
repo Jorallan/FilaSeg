@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import shutil
@@ -67,6 +68,7 @@ DEFAULT_PRE_FIT_SMOOTHING    = 1.5  # spline smoothing factor multiplier (higher
 
 # ── Reconnect (stage 3) ───────────────────────────────────────────────────
 DEFAULT_RECONNECT_VERSION   = "straight"
+DEFAULT_RECONNECT_CONFIG    = ROOT / "3.reconnect" / "reconnect_config.yaml"
 # Reconnect overlap handling (modifies the generated YAML `overlap` block):
 #   mode = "trim"  → keep all viable sub-components after removing overlap.
 #          "kill"  → drop the entire smaller component (legacy).
@@ -117,6 +119,18 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_RECONNECT_VERSION,
         choices=["straight"],
         help="Compatibility option; only the straight reconnect evaluator is supported.",
+    )
+    ap.add_argument(
+        "--reconnect-config",
+        type=Path,
+        default=DEFAULT_RECONNECT_CONFIG,
+        help="Reconnect YAML to use as the read-only source (default: production config).",
+    )
+    ap.add_argument(
+        "--reconnect-max-orientation-mismatch-deg",
+        type=float,
+        help="Per-run override for the local orientation-mismatch gate in all "
+             "reconnect stages; 180 disables the gate (ablation use).",
     )
     ap.add_argument("--reco-overlap-mode", type=str, default=DEFAULT_RECO_OVERLAP_MODE,
                     choices=["kill", "trim"],
@@ -218,6 +232,67 @@ def find_one(folder: Path, pattern: str) -> Path:
 
 def resolve_from_root(path: Path) -> Path:
     return path.resolve() if path.is_absolute() else (ROOT / path).resolve()
+
+
+def resolve_reconnect_config(path: Path) -> Path:
+    """Resolve and validate a read-only reconnect YAML source."""
+    source = resolve_from_root(path)
+    if not source.is_file():
+        raise FileNotFoundError(f"Reconnect config is not a file: {source}")
+    return source
+
+
+def prepare_reconnect_config(source: Path, run_dir: Path, scale_factor: float) -> Path:
+    """Create the per-run reconnect config without changing *source*."""
+    source = resolve_reconnect_config(source)
+    if abs(scale_factor - 1.0) >= 1e-3:
+        active = run_dir / "reconnect_config_scaled.yaml"
+        write_scaled_reconnect_yaml(source, active, scale_factor)
+    else:
+        active = run_dir / "reconnect_config_active.yaml"
+        shutil.copyfile(source, active)
+    return active
+
+
+def apply_reconnect_config_overrides(
+    config_path: Path, args: argparse.Namespace, branch_count: int
+) -> None:
+    """Apply CLI overrides to a per-run reconnect copy, never its source."""
+    import yaml as _yaml
+
+    cfg = _yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    overlap = cfg.setdefault("overlap", {})
+    overlap["mode"] = args.reco_overlap_mode
+    overlap["kill_thr"] = float(args.reco_overlap_kill_thr)
+    overlap["trim_dilate_px"] = int(args.reco_trim_dilate_px)
+    clear_thresholds = cfg.setdefault("stage_clear", {}).setdefault("thresholds", {})
+    default_branch_count = max(1, int(round(180 / DEFAULT_ANGLE_STEP_DEG)))
+    base_gap = int(clear_thresholds.get("clear_merge_backward_max_layer_gap", 3))
+    clear_thresholds["clear_merge_backward_max_layer_gap"] = max(
+        1, int(round(base_gap * branch_count / default_branch_count))
+    )
+    if args.reconnect_max_orientation_mismatch_deg is not None:
+        orientation_limit = float(args.reconnect_max_orientation_mismatch_deg)
+        if not 0.0 < orientation_limit <= 180.0:
+            raise ValueError(
+                "--reconnect-max-orientation-mismatch-deg must be in (0, 180]"
+            )
+        for stage_name in ("stage_clear", "stage_ambiguous", "stage_relaxed"):
+            cfg.setdefault(stage_name, {}).setdefault("thresholds", {})[
+                "max_orientation_mismatch_deg"
+            ] = orientation_limit
+    config_path.write_text(
+        _yaml.dump(cfg, default_flow_style=False, sort_keys=False), encoding="utf-8"
+    )
+
+
+def file_sha256(path: Path) -> str:
+    """Return the SHA-256 digest for a run artifact or source config."""
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as fh:
+        for block in iter(lambda: fh.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
 
 
 def endpoints(skel: np.ndarray) -> list[tuple[int, int]]:
@@ -343,6 +418,7 @@ def main() -> None:
     args.mask = resolve_from_root(args.mask)
     args.background = resolve_from_root(args.background)
     args.output_root = resolve_from_root(args.output_root)
+    reconnect_config_source = resolve_reconnect_config(args.reconnect_config)
     base = args.base or args.mask.parent.name
     run_dir = unique_run_dir(args.output_root, base)
     stringart_run = run_dir / STAGE_STRINGART
@@ -366,35 +442,15 @@ def main() -> None:
         if not (0.1 <= scale_factor <= 10.0):
             print(f"[scale] WARNING: scale factor {scale_factor:.3f} is outside expected 0.1–10× range")
         scale_pipeline_args(args, scale_factor)
-        reconnect_cfg = run_dir / "reconnect_config_scaled.yaml"
-        write_scaled_reconnect_yaml(
-            ROOT / "3.reconnect" / "reconnect_config.yaml", reconnect_cfg, scale_factor,
-        )
+        reconnect_cfg = prepare_reconnect_config(reconnect_config_source, run_dir, scale_factor)
     else:
         print(f"[scale] no scaling applied  (source={scale_source}, um_per_px={um_per_px:.6f})")
-        reconnect_cfg = ROOT / "3.reconnect" / "reconnect_config.yaml"
+        reconnect_cfg = prepare_reconnect_config(reconnect_config_source, run_dir, scale_factor)
 
-    # Apply CLI overrides to the reconnect YAML overlap block. If we had not
-    # already produced a scaled copy, copy the original into the run dir first
-    # so we never mutate the source YAML.
-    import yaml as _yaml
-    if reconnect_cfg == ROOT / "3.reconnect" / "reconnect_config.yaml":
-        reconnect_cfg = run_dir / "reconnect_config_active.yaml"
-        reconnect_cfg.write_text(
-            (ROOT / "3.reconnect" / "reconnect_config.yaml").read_text(encoding="utf-8"),
-            encoding="utf-8",
-        )
-    _cfg = _yaml.safe_load(reconnect_cfg.read_text(encoding="utf-8"))
-    _overlap = _cfg.setdefault("overlap", {})
-    _overlap["mode"] = args.reco_overlap_mode
-    _overlap["kill_thr"] = float(args.reco_overlap_kill_thr)
-    _overlap["trim_dilate_px"] = int(args.reco_trim_dilate_px)
-    _cm = _cfg.setdefault("stage_clear", {}).setdefault("thresholds", {})
+    # Apply CLI overrides only to the per-run config copy; the selected source
+    # is always read-only, whether it is production or a development study.
     _branch_count = max(1, int(round(180 / max(1, args.angle_step_deg))))
-    _default_branch_count = max(1, int(round(180 / DEFAULT_ANGLE_STEP_DEG)))
-    _base_gap = int(_cm.get("clear_merge_backward_max_layer_gap", 3))
-    _cm["clear_merge_backward_max_layer_gap"] = max(1, int(round(_base_gap * _branch_count / _default_branch_count)))
-    reconnect_cfg.write_text(_yaml.dump(_cfg, default_flow_style=False, sort_keys=False), encoding="utf-8")
+    apply_reconnect_config_overrides(reconnect_cfg, args, _branch_count)
 
     stage1_extra = []
     if args.stringart_no_auto_scale:
@@ -504,7 +560,10 @@ def main() -> None:
             "input_um_per_px": um_per_px,
             "scale_factor": scale_factor,
             "source": scale_source,
+            "reconnect_config_source": str(reconnect_config_source),
+            "reconnect_config_source_sha256": file_sha256(reconnect_config_source),
             "reconnect_config_used": str(reconnect_cfg),
+            "reconnect_config_sha256": file_sha256(reconnect_cfg),
         },
         "paths": {k: str(v) for k, v in paths.items()},
         "stage1": {

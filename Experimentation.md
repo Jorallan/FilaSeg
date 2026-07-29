@@ -473,6 +473,85 @@ lopsided than on the degraded mask (~3.5:1). Two things follow:
 (Also fixed in the same pass: `diagnose_connections.py` crashed with `_csv.Error: field larger
 than field limit` on the larger dense60 rejection logs — raised `csv.field_size_limit()`.)
 
+### Deep dive: can we push clean dense40 to 0.90-0.95? (2026-07-15) — both geometric levers FAIL
+
+Full id-by-id troubleshooting of the clean-dense40 residual (baseline mean F1 0.884; per-sample
+0.939/0.885/0.959/**0.751** — synth_0003 is the outlier). Method: `eval/id_audit.py` per-GT
+ledger + oracle ceilings + fragment-level and visual tracing.
+
+**Error budget (oracle, overlap-aware):** both-fixed oracle = **1.000** (fragment set is cleanly
+GT-separable — all error is grouping error). Perfect over-merge split → **0.933** (+0.049);
+perfect *targeted* under-merge join → 0.934 (+0.050). **Coupling: naive under-merge join BACKFIRES
+to 0.870** (rejoining split pieces drags over-merged blobs bigger). So over-merge must be fixed
+first; it also un-blocks joins.
+
+**Over-merge mechanism (the dominant error, concentrated in synth_0003):** the entangled GT pairs
+are shallow physical crossings — closest-approach median 0.8px, **crossing angle median 23°, 92% <
+40°**, so the stage-3 orientation-mismatch gate (40°) structurally cannot separate them. The
+over-merged pred component is a **smooth 2-endpoint line** (no junction) that follows one filament
+then switches onto the crossing filament at the junction — it takes ONE arm of each filament, so
+there is nothing to "split." Fragment-level trace: **~⅔ of fusions are stage-1/2** (a single Hough
+fragment already spans two filaments across the crossing — a bridging fragment that physically
+glues the two filaments' fragment-sets into one component), **~⅓ are reconnect joins**. Only ~1
+*direct* wrong tip-accept per run — the fusion is structural, not a gated decision.
+
+**Two geometric fixes prototyped, BOTH FAIL (don't retry):**
+1. **Split over-merged components at skeleton junctions** → no-op (thin F1 0.876→0.875). The
+   over-merged components have 2 endpoints / 0 junctions; there is no X to split.
+2. **Full clean-skeleton straight-through trace** (walk the skeleton graph, pair arms at each
+   junction by min-turn / max-anti-parallel, relabel) → **F1 0.708** (P 0.982 / R 0.560), *worse*
+   than the 0.884 pipeline. It under-merges: dense crossings form 5-/6-/8-arm junction BLOBS (two
+   nearby crossings fused) where anti-parallel pairing is ambiguous and orphans 71-94 arms/sample,
+   shattering each filament into ~2.5-3 pieces. cos_thr insensitive [-0.3,-0.7]; force-pairing
+   (pair everything) does NOT recover recall (0.56→0.56) and crashes precision to 0.58 — the
+   correct partner is often simply not present as a clean arm. Control: GT-labeled skeleton through
+   the identical harness = **F1 1.000**, so the loss is 100% the pairing rule, not measurement.
+
+3. **Clean-isolated-crossing hybrid** (keep pipeline grouping for recall; re-pair arms by min-turn
+   ONLY at clean, well-separated 4-arm crossings — the resolvable subset) → mean thin F1 0.876 →
+   **0.881, marginal and confounded**. The apparent per-sample swings (+0.029 on synth_0000,
+   −0.024 on synth_0002) are re-segmentation noise, not crossing repair: synth_0000's "+0.029" came
+   with **0 corrections applied**. Real corrections were ~0 (n_corrected = 0/0/2/0 across samples).
+
+**Why even the targeted hybrid has almost no headroom — the decisive root cause.** The over-merge
+is mostly NOT in the grouping; it is baked into the stage-2 FRAGMENTS themselves. Fragment-level
+trace of synth_0003's 6 over-merged preds: **~⅔ are stage-1/2** — a single Hough-derived stage-2
+fragment already spans two filaments across the crossing (the atomic unit the metric groups already
+merges them), so **no reconnect-level or regrouping fix can undo it** (you would have to split the
+fragment, which requires a stage-1 change or SEM intensity). Only **~⅓ are reconnect joins** of
+distinct 1-GT fragments (regroup-fixable), and only ~half of those sit at clean-isolated crossings.
+Net fixable-by-regrouping ⇒ ~1/6 of over-merges ⇒ negligible mean gain. This is why all three
+geometric approaches (split, trace, clean-crossing hybrid) net marginal-to-negative.
+
+4. **Upstream fix — cut stage-2 branch images at crossing junctions, then re-reconnect** (attack
+   the root cause in stage 1/2 as the user suggested; let reconnect's mutual-best straight-through
+   preference re-pair the arms). Two variants, BOTH fail: cut at ALL degree-≥3 junctions (r=3) →
+   **0.532** (shatters — most junctions are T-touches/spurs, not crossings; reconnect can't
+   reassemble the debris). Cut ONLY at clean-isolated 4-arm crossings (r=2) → **0.854** (still
+   *hurts* baseline 0.876). The surgical result is the tell: synth_0001 and **synth_0003 (the
+   worst sample) are UNCHANGED — they have zero clean-isolated crossings**; where the cut fires
+   (synth_0000, 0002) it lowers both P and R because those clean crossings were *already handled
+   correctly* by the pipeline, so cutting merely forces an imperfect re-join. **The fixable
+   over-merges are at dense multi-way crossing BLOBS, which cannot be surgically isolated (broad
+   cut shatters) and are locally ambiguous — no stage-1/2 cut reaches them.** (Correction to an
+   earlier note here: the "spanning fragment" signal overstated stage-1's role — those fragments
+   are clean single-filament lines that merely overlap the *other* filament's GT stroke at the
+   shared crossing pixels; the real over-merge is distinct A- and B-fragments physically touching
+   at the crossing region and getting grouped. Cutting there still fails, per above.)
+
+**Final conclusion (reconfirms the standing junction-ambiguity ceiling on a PERFECT mask):** the
+pipeline over-merges (P 0.885 / R 0.959) and the geometric trace under-merges (P 0.982 / R 0.560)
+— opposite failure modes, neither reaching the 0.933 ceiling. The majority of over-merge is a
+STAGE-1 artifact (tiled-Hough draws a single line across a shallow crossing), not a reconnect
+decision, so it cannot be repaired downstream by geometry. Breaking the tie needs NON-LOCAL
+information — SEM intensity / continuity priors (`eval/SEM_PLAN.md`) to split the spanning
+fragments, or a crossing-aware STAGE-1 that refuses to draw across genuine junctions (but the
+full-skeleton straight-through variant of that under-merges, above — it would need SEM too at dense
+blobs). The clean synthetic set now validates SEM with unlimited free GT (the long-standing
+"blocked on real GT volume" blocker does not apply to synthetic). Better local pairing rules are
+exhausted. Tools: `eval/id_audit.py`; throwaway analysis in scratchpad (`wrong_accept_geom.py`,
+`junction_split_proto.py`, `trace_frag.py`, `straight_through_trace.py`, `clean_crossing_repair.py`).
+
 ---
 
 ## Evaluation subsystem (`eval/`)

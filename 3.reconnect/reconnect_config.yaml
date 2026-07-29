@@ -134,8 +134,10 @@ stage_clear:
     max_passes: 6                # clear-merge pass count
   thresholds:
     merge_mode: clear            # only clear-merge candidates can be accepted
+    curvature_measure: geometric # px^-1 geometric curvature; legacy_mixed is development-study only
     max_tip_distance_px: 16      # search cap for clear gaps
     max_curvature_delta: 0.16    # reject mismatched local curvature even for clear gaps
+    max_tip_fit_quality: 0.0     # dimensionless tip fit quality q_fit = RMS/Lambda; 0 disables the gate (see paper Section on curvature)
     max_bridge_intrusion_frac: 0.22 # short-gap intrusion cap
     clear_merge_max_dist_px: 16.0 # clear merge distance cap
     clear_merge_max_line_resid_px: 6.0 # clear merge residual cap
@@ -153,6 +155,7 @@ stage_strict:
     stage_name: strict_tip_reconnect # previous strict/short reconnect pass
     max_passes: 8                # short-gap pass count
   thresholds:
+    curvature_measure: geometric # px^-1 geometric curvature; legacy_mixed is development-study only
     merge_mode: normal           # use the full normal evaluator
     max_tip_distance_px: 15      # short-gap distance cap
     min_forward_cos: 0.80        # stricter forward alignment
@@ -160,6 +163,7 @@ stage_strict:
     max_turn_deg: 45.0           # short-gap turn cap
     max_line_residual_px: 6      # short-gap residual cap
     max_curvature_delta: 0.16    # short-gap curvature cap
+    max_tip_fit_quality: 0.0     # dimensionless tip fit quality q_fit = RMS/Lambda; 0 disables the gate (see paper Section on curvature)
     max_bridge_intrusion_frac: 0.22 # short-gap intrusion cap
     max_smooth_rms_px: 6.0       # short-gap smoothness cap
     max_arc_miss_frac: 0.55      # short-gap arc miss cap
@@ -176,6 +180,7 @@ stage_relaxed:
     stage_name: relaxed_tip_reconnect # previous relaxed/wider reconnect pass
     max_passes: 6                # wider pass count
   thresholds:
+    curvature_measure: geometric # px^-1 geometric curvature; legacy_mixed is development-study only
     merge_mode: normal           # use the full normal evaluator
     max_tip_distance_px: 50      # wider distance cap
     min_forward_cos: 0.72        # relaxed forward alignment
@@ -183,6 +188,7 @@ stage_relaxed:
     max_turn_deg: 70.0           # wider turn cap
     max_line_residual_px: 16     # wider residual cap
     max_curvature_delta: 0.2     # wider curvature cap
+    max_tip_fit_quality: 0.0     # dimensionless tip fit quality q_fit = RMS/Lambda; 0 disables the gate (see paper Section on curvature)
     max_bridge_intrusion_frac: 0.32 # wider intrusion cap
     long_bridge_min_dist_px: 40 # optional absolute third-component cap starts here
     long_bridge_max_intrusion_components: 1 # reject long bridges crossing 2+ component IDs
