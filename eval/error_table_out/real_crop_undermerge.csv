@@ -1,0 +1,17 @@
+gt,n_frags,n_pred,dom_pred,recovery,category,detail
+2,3,2,11,0.67,U1_crossing_split,"dom 67%, split into 2 ids, worst gap 0px"
+3,5,2,12,0.6,U1_crossing_split,"dom 60%, split into 2 ids, worst gap 0px"
+4,6,2,7,0.83,U5_minor_leak,dom id holds 83%; 1 leaked frag-group(s)
+5,4,2,24,0.75,U1_crossing_split,"dom 75%, split into 2 ids, worst gap 9px"
+6,4,2,2,0.75,U1_crossing_split,"dom 75%, split into 2 ids, worst gap 0px"
+8,4,2,9,0.75,U1_crossing_split,"dom 75%, split into 2 ids, worst gap 0px"
+12,5,3,46,0.4,U2_wide_break,"dom 40%, split into 3 ids, worst gap 244px"
+21,4,2,14,0.75,U3_mid_break,"dom 75%, split into 2 ids, worst gap 17px"
+25,3,2,63,0.67,U2_wide_break,"dom 67%, split into 2 ids, worst gap 59px"
+31,5,3,23,0.6,U1_crossing_split,"dom 60%, split into 3 ids, worst gap 0px"
+36,2,2,53,0.5,U3_mid_break,"dom 50%, split into 2 ids, worst gap 28px"
+37,2,2,19,0.5,U1_crossing_split,"dom 50%, split into 2 ids, worst gap 0px"
+41,5,3,22,0.4,U3_mid_break,"dom 40%, split into 3 ids, worst gap 37px"
+69,2,2,31,0.5,U1_crossing_split,"dom 50%, split into 2 ids, worst gap 0px"
+83,3,3,13,0.33,U2_wide_break,"dom 33%, split into 3 ids, worst gap 62px"
+93,0,0,0,0.0,U4_dropped,no surviving fragment

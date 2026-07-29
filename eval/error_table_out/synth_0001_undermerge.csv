@@ -1,0 +1,9 @@
+gt,n_frags,n_pred,dom_pred,recovery,category,detail
+3,6,2,9,0.83,U5_minor_leak,dom id holds 83%; 1 leaked frag-group(s)
+9,3,2,15,0.67,U3_mid_break,"dom 67%, split into 2 ids, worst gap 28px"
+12,4,2,10,0.5,U1_crossing_split,"dom 50%, split into 2 ids, worst gap 0px"
+13,5,3,6,0.6,U1_crossing_split,"dom 60%, split into 3 ids, worst gap 0px"
+15,5,2,17,0.6,U1_crossing_split,"dom 60%, split into 2 ids, worst gap 0px"
+18,6,2,5,0.67,U3_mid_break,"dom 67%, split into 2 ids, worst gap 13px"
+20,2,2,25,0.5,U1_crossing_split,"dom 50%, split into 2 ids, worst gap 0px"
+24,5,2,11,0.6,U3_mid_break,"dom 60%, split into 2 ids, worst gap 18px"

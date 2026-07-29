@@ -1,0 +1,5 @@
+pred,dom_gt,minority_gt,minority_share_of_pred,share_of_minority_gt,type,angle,gap,category,fate
+4,8,13,0.25,0.2,crossing,30deg,0.0,O2_crossing_fusion,gB=13 leaked 20% here; main id elsewhere (pred 6)
+5,18,9,0.2,0.33,crossing,6deg,0.0,O2_crossing_fusion,gB=9 leaked 33% here; main id elsewhere (pred 15)
+7,4,15,0.4,0.4,crossing,3deg,0.0,O2_crossing_fusion,gB=15 leaked 40% here; main id elsewhere (pred 17)
+15,18,9,0.5,0.67,crossing,6deg,0.0,O2_crossing_fusion,gB=9 ABSORBED into gA=18 (lost as distinct id)

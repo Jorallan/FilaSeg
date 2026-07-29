@@ -1,0 +1,7 @@
+gt,n_frags,n_pred,dom_pred,recovery,category,detail
+2,3,2,5,0.67,U1_crossing_split,"dom 67%, split into 2 ids, worst gap 0px"
+3,2,2,3,0.5,U3_mid_break,"dom 50%, split into 2 ids, worst gap 28px"
+5,4,2,14,0.5,U1_crossing_split,"dom 50%, split into 2 ids, worst gap 0px"
+19,0,0,0,0.0,U4_dropped,no surviving fragment
+20,3,3,9,0.33,U1_crossing_split,"dom 33%, split into 3 ids, worst gap 6px"
+24,0,0,0,0.0,U4_dropped,no surviving fragment

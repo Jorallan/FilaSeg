@@ -1,0 +1,41 @@
+gt_id,n_frags,n_pred_ids,dom_pred,frags_in_dom,shares_pred_with,status,root_cause
+1,5,2,2,3,28,SPLIT+MERGED,gate:distancex2; gate:orientation_mismatchx1; merge@transitive(stage3)x27; merge@stage_relaxedx1
+2,5,1,17,5,,OK,
+3,1,1,1,1,8,MERGED,merge@transitive(stage3)x8
+4,1,1,40,1,,OK,
+5,2,1,26,2,,OK,
+6,1,1,37,1,,OK,
+7,4,1,11,4,,OK,
+8,5,2,1,4,3,SPLIT+MERGED,gate:distancex2; merge@transitive(stage3)x18; merge@stage_clearx2
+9,3,1,5,3,,OK,
+10,1,1,41,1,,OK,
+11,1,1,39,1,,OK,
+12,2,1,9,2,,OK,
+13,4,1,24,4,,OK,
+14,3,1,20,3,,OK,
+15,2,1,8,2,,OK,
+16,2,1,25,2,,OK,
+17,1,1,31,1,,OK,
+18,1,1,32,1,,OK,
+19,6,1,4,6,,OK,
+20,4,2,10,3,,SPLIT,never_candidate x1 -> stage1/2
+21,7,1,3,7,,OK,
+22,3,1,12,3,,OK,
+23,2,1,6,2,,OK,
+24,3,1,21,3,,OK,
+25,0,0,0,0,,DROPPED,upstream/unlogged -> stage1/2
+26,5,1,13,5,,OK,
+27,1,1,35,1,,OK,
+28,5,1,2,5,1,MERGED,merge@transitive(stage3)x21; merge@stage_clearx2
+29,1,1,16,1,,OK,
+30,3,1,22,3,,OK,
+31,4,1,18,4,,OK,
+32,1,1,38,1,,OK,
+33,1,1,28,1,,OK,
+34,3,1,29,3,,OK,
+35,2,1,27,2,,OK,
+36,2,1,14,2,,OK,
+37,3,1,19,3,,OK,
+38,4,1,7,4,,OK,
+39,2,1,15,2,,OK,
+40,4,2,23,3,,SPLIT,gate:distancex4

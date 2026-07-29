@@ -1,0 +1,26 @@
+gt_id,n_frags,n_pred_ids,dom_pred,frags_in_dom,shares_pred_with,status,root_cause
+1,1,1,23,1,,OK,
+2,2,1,1,2,,OK,
+3,6,2,9,5,,SPLIT,gate:distancex5; gate:orientation_mismatchx2
+4,3,1,7,3,15,MERGED,merge@transitive(stage3)x8; merge@stage_clearx1
+5,5,1,2,5,,OK,
+6,2,1,14,2,,OK,
+7,1,1,13,1,,OK,
+8,3,1,4,3,13,MERGED,merge@transitive(stage3)x13; merge@stage_clearx1
+9,3,2,15,2,18,SPLIT+MERGED,gate:distancex5; merge@transitive(stage3)x24; merge@stage_relaxedx2
+10,1,1,27,1,,OK,
+11,1,1,22,1,,OK,
+12,4,2,10,2,,SPLIT,gate:distancex12; gate:orientation_mismatchx5
+13,5,3,6,3,,SPLIT,gate:distancex8
+14,2,1,16,2,,OK,
+15,5,2,17,3,,SPLIT,gate:distancex7
+16,3,1,21,3,,OK,
+17,5,1,12,5,,OK,
+18,6,2,5,4,9,SPLIT+MERGED,gate:distancex12; gate:orientation_mismatchx6; merge@transitive(stage3)x25; merge@stage_relaxedx2
+19,5,1,8,5,,OK,
+20,2,2,25,1,,SPLIT,gate:orientation_mismatchx3
+21,3,1,18,3,,OK,
+22,5,1,3,5,,OK,
+23,1,1,28,1,,OK,
+24,5,2,11,3,,SPLIT,gate:distancex12; gate:orientation_mismatchx1
+25,3,1,20,3,,OK,

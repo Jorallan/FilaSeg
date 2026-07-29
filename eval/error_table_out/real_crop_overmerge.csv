@@ -1,0 +1,12 @@
+pred,dom_gt,minority_gt,minority_share_of_pred,share_of_minority_gt,type,angle,gap,category,fate
+5,27,31,0.25,0.2,bridge,n/a,161.9,O1_wrong_bridge,gB=31 leaked 20% here; main id elsewhere (pred 23)
+5,27,112,0.25,1.0,bridge,n/a,42.1,O1_wrong_bridge,gB=112 ABSORBED into gA=27 (lost as distinct id)
+13,83,12,0.5,0.2,crossing,61deg,0.0,O2_crossing_fusion,gB=12 leaked 20% here; main id elsewhere (pred 46)
+19,44,37,0.5,0.5,crossing,17deg,0.0,O2_crossing_fusion,gB=37 ABSORBED into gA=44 (lost as distinct id)
+22,41,37,0.33,0.5,crossing,42deg,0.0,O2_crossing_fusion,gB=37 leaked 50% here; main id elsewhere (pred 19)
+25,20,6,0.33,0.25,crossing,12deg,0.0,O2_crossing_fusion,gB=6 leaked 25% here; main id elsewhere (pred 2)
+26,79,41,0.33,0.2,bridge,0deg,2.0,O1_wrong_bridge,gB=41 leaked 20% here; main id elsewhere (pred 22)
+36,2,47,0.5,1.0,bridge,n/a,29.5,O1_wrong_bridge,gB=47 ABSORBED into gA=2 (lost as distinct id)
+37,99,36,0.33,0.5,crossing,2deg,0.0,O2_crossing_fusion,gB=36 leaked 50% here; main id elsewhere (pred 53)
+37,99,67,0.33,1.0,crossing,23deg,0.0,O2_crossing_fusion,gB=67 ABSORBED into gA=99 (lost as distinct id)
+43,25,60,0.5,1.0,crossing,89deg,0.0,O2_crossing_fusion,gB=60 ABSORBED into gA=25 (lost as distinct id)
