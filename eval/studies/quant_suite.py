@@ -60,7 +60,7 @@ CASES = [
     ),
 ]
 
-OUT_DIR = ROOT / "eval" / "quantify_out"
+OUT_DIR = ROOT / "eval" / "results" / "quantify_out"
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 REPORT_PATH = OUT_DIR / "quantification_report.md"
 

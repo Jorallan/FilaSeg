@@ -19,7 +19,7 @@ import _evalpath  # noqa: F401  (restores the flat eval/ import namespace)
 import instance_io as iio   # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[2]  # repository root
-OUT = ROOT / "eval" / "quantify_out"
+OUT = ROOT / "eval" / "results" / "quantify_out"
 CASES = [
     ("real_crop", "output/audit/real_crop",
      "output/full_pipeline/sem00000_crop512_manual/modified/sem_full_00000_1p66_crop512_manual_multilabel.npz"),

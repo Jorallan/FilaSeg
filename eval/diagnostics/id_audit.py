@@ -48,7 +48,7 @@ import metrics as M                # noqa: E402
 import diagnose_connections as DC  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[2]  # repository root
-OUT_DIR = ROOT / "eval" / "audit_out"
+OUT_DIR = ROOT / "eval" / "results" / "audit_out"
 
 
 # ── per-GT contingency ────────────────────────────────────────────────────
