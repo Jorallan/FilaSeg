@@ -40,6 +40,7 @@ import metrics as M  # noqa: E402
 import stats_util  # noqa: E402
 
 METHODS = ("baseline_cc", "baseline_skeleton")
+GT_UNASSIGNED_POLICY = "singleton"
 ROW_REQUIRED = {"geometry_id", "density", "seed", "mask_variant", "method", "status", "output_path"}
 
 
@@ -141,7 +142,9 @@ def _score(mask: np.ndarray, gt_path: Path, pred: Any,
     that InstanceSet all the way through is important: flattening it before
     common_metric would discard the overlap ownership the pipeline preserved.
     """
-    common = CM.score_method(mask, gt_path, pred)
+    common = CM.score_method(
+        mask, gt_path, pred, gt_unassigned_policy=GT_UNASSIGNED_POLICY
+    )
     gt, meta = IIO.load_gt(gt_path, shape=mask.shape)
     if isinstance(pred, np.ndarray):
         pred = IIO.instances_from_label_image(pred.astype(np.int32))
@@ -297,7 +300,7 @@ def _method_key(row: Dict[str, Any]) -> str:
 
 
 def _summary_block(rows: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
-    """Scene-level summaries, with parameterised grid members kept distinct."""
+    """Density-stratified scene summaries with parameter grids kept distinct."""
     methods = sorted({_method_key(r) for r in rows})
     by_method: Dict[str, Any] = {}
     good: Dict[str, Dict[str, Dict[str, float]]] = {}
@@ -311,22 +314,45 @@ def _summary_block(rows: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
             for r in successes if r["scores"].get("common_metric", {}).get("fragment_recovery_recovery_rate") is not None}
         good[method] = {"common_metric.f1": f1,
                         "common_metric.fragment_recovery_recovery_rate": recovery}
+        strata = {
+            f"{r['geometry_id']}|{r['mask_variant']}": str(r.get("density"))
+            for r in successes
+        }
+        f1_by_density: Dict[str, List[float]] = {}
+        recovery_by_density: Dict[str, List[float]] = {}
+        for scene_id, value in f1.items():
+            f1_by_density.setdefault(strata[scene_id], []).append(value)
+        for scene_id, value in recovery.items():
+            recovery_by_density.setdefault(strata[scene_id], []).append(value)
         by_method[method] = {"n_rows": len(rs), "n_success": len(successes),
                              "n_failed": sum(r.get("status") == "failed" for r in rs),
-                             "common_f1": _jsonable(stats_util.summarize(list(f1.values())).as_dict()),
+                             "common_f1": _jsonable(
+                                 stats_util.stratified_summarize(f1_by_density).as_dict()),
                              "shared_fragment_recovery_rate": _jsonable(
-                                 stats_util.summarize(list(recovery.values())).as_dict())}
+                                 stats_util.stratified_summarize(
+                                     recovery_by_density).as_dict())}
     paired: List[Dict[str, Any]] = []
     for i, left in enumerate(methods):
         for right in methods[i + 1:]:
             for metric in ("common_metric.f1", "common_metric.fragment_recovery_recovery_rate"):
                 left_values, right_values = good[left][metric], good[right][metric]
                 ids = sorted(set(left_values) & set(right_values))
+                paired_strata = {
+                    scene_id: str(next(
+                        r.get("density") for r in rows
+                        if f"{r['geometry_id']}|{r['mask_variant']}" == scene_id
+                    ))
+                    for scene_id in ids
+                }
                 paired.append({"method_a": left, "method_b": right, "metric": metric,
                                "n_paired_scenes": len(ids), "n_missing_a": len(set(right_values) - set(left_values)),
                                "n_missing_b": len(set(left_values) - set(right_values)),
-                               "a_minus_b": _jsonable(stats_util.paired_summarize(
-                                   [left_values[x] for x in ids], [right_values[x] for x in ids]).as_dict())})
+                               "a_minus_b": _jsonable(
+                                   stats_util.paired_stratified_summarize_by_scene(
+                                       {x: left_values[x] for x in ids},
+                                       {x: right_values[x] for x in ids},
+                                       paired_strata,
+                                   ).as_dict())})
     return {"by_method": by_method, "paired": paired,
             "failure_count": sum(r.get("status") == "failed" for r in rows)}
 
@@ -437,11 +463,13 @@ def run_experiment(samples_root: Path | str, out_json: Path | str, *, mask_name:
             rows.append(old if old is not None and row_complete(old, hashes, filaseg_params) else
                         _run_filaseg(scene, froot, filaseg, hashes, reconnect_source))
     aggregate = _summaries(rows)
-    document: Dict[str, Any] = {"schema_version": 1, "samples_root": str(root.resolve()),
+    document: Dict[str, Any] = {"schema_version": 2, "samples_root": str(root.resolve()),
         "configuration": {"mask_name": mask_name, "mask_variant": mask_variant, "methods": list(methods),
             "filaseg": filaseg, "cc_min_area": cc_min_area, "max_gap_px": max_gap_px,
             "max_turn_deg": max_turn_deg, "sweep_gaps": list(sweep_gaps or []), "sweep_turns": list(sweep_turns or []),
             "configuration_locked": configuration_locked,
+            "gt_unassigned_policy": GT_UNASSIGNED_POLICY,
+            "overall_bootstrap": "within_density_then_scene_weighted_pooling",
             "reconnect_config_source": str(reconnect_source)},
         "config_hashes": hashes, "provenance": provenance, "per_scene": rows, "aggregate": aggregate}
     if grid:

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
@@ -33,8 +34,45 @@ SEED_FORMULA = "seed = seed0 + round(coverage*100)*100 + sample_index"
 FIELDS = [
     "seed", "density", "geometry_id", "dataset_role", "mask_width",
     "degradation", "input_mask", "ground_truth", "method", "output_path",
-    "config_hash", "status", "failure_notes",
+    "config_hash", "status", "failure_notes", "source_report",
+    "source_report_sha256", "input_mask_sha256", "input_mask_hash_status",
+    "ground_truth_sha256", "ground_truth_hash_status", "output_sha256",
+    "output_hash_status", "ground_truth_selected",
+    "ground_truth_selected_sha256", "ground_truth_selected_hash_status",
 ]
+
+
+def _sha256(path_text: str) -> Tuple[str, str]:
+    """Return an artifact digest and an explicit, non-throwing availability state."""
+    if not path_text:
+        return "", "not_recorded"
+    path = Path(path_text)
+    if not path.is_file():
+        return "", "missing"
+    digest = hashlib.sha256()
+    try:
+        with path.open("rb") as fh:
+            for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+                digest.update(chunk)
+    except OSError:
+        return "", "unreadable"
+    return digest.hexdigest(), "present"
+
+
+def _successful(status: str) -> bool:
+    """Treat only terminal success states as eligible for an output artifact hash."""
+    return status.strip().lower() in {"ok", "success", "succeeded", "completed"}
+
+
+def _selected_ground_truth(path_text: str) -> str:
+    """Mirror ``instance_io.load_gt`` overlap-aware sibling selection."""
+    if not path_text:
+        return ""
+    path = Path(path_text)
+    if path.suffix.lower() == ".npz":
+        return str(path)
+    sibling = path.with_name("gt_multilabel.npz")
+    return str(sibling if sibling.is_file() else path)
 
 
 def _generator_command(report: Mapping[str, Any], role: str) -> str:
@@ -77,7 +115,8 @@ def _scene_paths(row: Mapping[str, Any], report: Mapping[str, Any]) -> Tuple[str
             str(ground_truth) if ground_truth is not None else (scene / "gt_labels.tif").as_posix())
 
 
-def _manifest_rows(report: Mapping[str, Any], role: str) -> List[Dict[str, Any]]:
+def _manifest_rows(report: Mapping[str, Any], role: str, source_report: Path,
+                   source_report_sha256: str) -> List[Dict[str, Any]]:
     if role not in {"development", "locked"}:
         raise ValueError(f"unknown dataset role {role!r}")
     source_rows = report.get("per_scene")
@@ -98,6 +137,18 @@ def _manifest_rows(report: Mapping[str, Any], role: str) -> List[Dict[str, Any]]
             raise ValueError(f"{role} per_scene[{index}] has invalid seed/density") from exc
         mask_width = str(raw.get("mask_width", raw["mask_variant"]))
         input_mask, ground_truth = _scene_paths(raw, report)
+        status = str(raw["status"])
+        input_mask_sha256, input_mask_hash_status = _sha256(input_mask)
+        ground_truth_sha256, ground_truth_hash_status = _sha256(ground_truth)
+        ground_truth_selected = _selected_ground_truth(ground_truth)
+        ground_truth_selected_sha256, ground_truth_selected_hash_status = _sha256(
+            ground_truth_selected
+        )
+        output_path = str(raw["output_path"])
+        if _successful(status):
+            output_sha256, output_hash_status = _sha256(output_path)
+        else:
+            output_sha256, output_hash_status = "", "not_applicable_failed"
         rows.append({
             "seed": seed,
             "density": density,
@@ -108,10 +159,21 @@ def _manifest_rows(report: Mapping[str, Any], role: str) -> List[Dict[str, Any]]
             "input_mask": input_mask,
             "ground_truth": ground_truth,
             "method": str(raw["method"]),
-            "output_path": str(raw["output_path"]),
+            "output_path": output_path,
             "config_hash": _config_hash(raw, report),
-            "status": str(raw["status"]),
+            "status": status,
             "failure_notes": str(raw.get("failure_notes", raw.get("error", "")) or ""),
+            "source_report": str(source_report),
+            "source_report_sha256": source_report_sha256,
+            "input_mask_sha256": input_mask_sha256,
+            "input_mask_hash_status": input_mask_hash_status,
+            "ground_truth_sha256": ground_truth_sha256,
+            "ground_truth_hash_status": ground_truth_hash_status,
+            "ground_truth_selected": ground_truth_selected,
+            "ground_truth_selected_sha256": ground_truth_selected_sha256,
+            "ground_truth_selected_hash_status": ground_truth_selected_hash_status,
+            "output_sha256": output_sha256,
+            "output_hash_status": output_hash_status,
         })
     return rows
 
@@ -147,11 +209,12 @@ def build_manifest(locked_results: Optional[Path | str] = None,
         path = Path(source)
         if not path.is_file():
             raise FileNotFoundError(f"{role} results report does not exist: {path}")
-        report = json.loads(path.read_text(encoding="utf-8"))
+        report_bytes = path.read_bytes()
+        report = json.loads(report_bytes.decode("utf-8"))
         if not isinstance(report, Mapping):
             raise ValueError(f"{role} results report must contain a JSON object")
         reports.append((role, path, report))
-        rows.extend(_manifest_rows(report, role))
+        rows.extend(_manifest_rows(report, role, path, hashlib.sha256(report_bytes).hexdigest()))
     if not reports:
         raise ValueError("provide --locked-results/--results and/or --development-results")
     _validate_rows(rows)

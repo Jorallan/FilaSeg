@@ -7,6 +7,7 @@ Three quantities are provided:
 
     summarize(values)                 mean, sd, and a 95% bootstrap CI
     paired_summarize(a, b)            the same for the paired difference a - b
+    stratified_summarize(values)      a within-stratum bootstrap CI
     ci_halfwidth(...)                 the achieved 95% CI half-width
 
 The bootstrap is the ordinary non-parametric percentile bootstrap over scenes,
@@ -54,6 +55,34 @@ def _bootstrap_ci(values: np.ndarray, n_boot: int, seed: int,
     return lo, hi
 
 
+def _stratified_bootstrap_ci(values_by_stratum: Mapping[str, np.ndarray],
+                             n_boot: int, seed: int,
+                             alpha: float = 0.05) -> tuple:
+    """Percentile CI after resampling scenes independently within strata.
+
+    Every replicate contains the original number of finite scenes from every
+    declared stratum.  Pooling those resamples therefore targets the ordinary
+    scene-weighted mean, while respecting the density-stratified design.
+    """
+    groups = [(name, values_by_stratum[name])
+              for name in sorted(values_by_stratum)]
+    n = sum(values.size for _, values in groups)
+    if n < 2:
+        v = float(groups[0][1][0]) if n == 1 else float("nan")
+        return v, v
+    rng = np.random.default_rng(seed)
+    totals = np.zeros(n_boot, dtype=float)
+    for _, values in groups:
+        if values.size == 0:
+            continue
+        idx = rng.integers(0, values.size, size=(n_boot, values.size))
+        totals += values[idx].sum(axis=1)
+    means = totals / n
+    lo = float(np.percentile(means, 100.0 * alpha / 2.0))
+    hi = float(np.percentile(means, 100.0 * (1.0 - alpha / 2.0)))
+    return lo, hi
+
+
 def summarize(values: Sequence[float], seed: int = BOOTSTRAP_SEED,
               n_boot: int = N_BOOTSTRAP) -> Summary:
     """Mean, sample standard deviation and 95% bootstrap CI over scenes."""
@@ -66,6 +95,37 @@ def summarize(values: Sequence[float], seed: int = BOOTSTRAP_SEED,
     sd = float(v.std(ddof=1)) if v.size > 1 else float("nan")
     lo, hi = _bootstrap_ci(v, n_boot, seed)
     return Summary(int(v.size), mean, sd, lo, hi, float((hi - lo) / 2.0))
+
+
+def stratified_summarize(values_by_stratum: Mapping[str, Sequence[float]],
+                         seed: int = BOOTSTRAP_SEED,
+                         n_boot: int = N_BOOTSTRAP) -> Summary:
+    """Scene-weighted summary with a bootstrap stratified by design group.
+
+    The point estimate and standard deviation are calculated after pooling all
+    finite scene values.  Only the uncertainty interval is stratified: a
+    replicate resamples each stratum independently, retaining that stratum's
+    original scene count before pooling.  Stratum names are sorted so a seeded
+    result does not depend on mapping insertion order.
+    """
+    finite_by_stratum = {
+        name: np.asarray([float(x) for x in values], dtype=float)
+        for name, values in values_by_stratum.items()
+    }
+    finite_by_stratum = {
+        name: values[np.isfinite(values)]
+        for name, values in finite_by_stratum.items()
+    }
+    pooled = np.concatenate([finite_by_stratum[name]
+                             for name in sorted(finite_by_stratum)]) \
+        if finite_by_stratum else np.array([], dtype=float)
+    if pooled.size == 0:
+        return Summary(0, float("nan"), float("nan"), float("nan"),
+                       float("nan"), float("nan"))
+    mean = float(pooled.mean())
+    sd = float(pooled.std(ddof=1)) if pooled.size > 1 else float("nan")
+    lo, hi = _stratified_bootstrap_ci(finite_by_stratum, n_boot, seed)
+    return Summary(int(pooled.size), mean, sd, lo, hi, float((hi - lo) / 2.0))
 
 
 def paired_summarize(a: Sequence[float], b: Sequence[float],
@@ -84,6 +144,39 @@ def paired_summarize(a: Sequence[float], b: Sequence[float],
         raise ValueError(f"paired inputs must align: {av.shape} vs {bv.shape}")
     ok = np.isfinite(av) & np.isfinite(bv)
     return summarize(av[ok] - bv[ok], seed=seed, n_boot=n_boot)
+
+
+def paired_stratified_summarize(
+        a_by_stratum: Mapping[str, Sequence[float]],
+        b_by_stratum: Mapping[str, Sequence[float]],
+        seed: int = BOOTSTRAP_SEED,
+        n_boot: int = N_BOOTSTRAP) -> Summary:
+    """Stratified summary of paired differences, ``a - b``.
+
+    Within every stratum, the two method vectors must have identical shape and
+    the bootstrap samples the resulting differences by one shared index.  This
+    preserves the locked scene pairing while resampling within density.
+    """
+    a_keys, b_keys = set(a_by_stratum), set(b_by_stratum)
+    if a_keys != b_keys:
+        missing_from_a = sorted(b_keys - a_keys)
+        missing_from_b = sorted(a_keys - b_keys)
+        raise ValueError(
+            "stratum keys must match exactly; "
+            f"missing from a={missing_from_a}, missing from b={missing_from_b}"
+        )
+    differences = {}
+    for stratum in sorted(a_keys):
+        av = np.asarray([float(x) for x in a_by_stratum[stratum]], dtype=float)
+        bv = np.asarray([float(x) for x in b_by_stratum[stratum]], dtype=float)
+        if av.shape != bv.shape:
+            raise ValueError(
+                f"paired inputs must align within stratum {stratum!r}: "
+                f"{av.shape} vs {bv.shape}"
+            )
+        ok = np.isfinite(av) & np.isfinite(bv)
+        differences[stratum] = av[ok] - bv[ok]
+    return stratified_summarize(differences, seed=seed, n_boot=n_boot)
 
 
 def paired_summarize_by_scene(a: Mapping[str, float], b: Mapping[str, float],
@@ -107,6 +200,42 @@ def paired_summarize_by_scene(a: Mapping[str, float], b: Mapping[str, float],
     scene_ids = sorted(a_keys)
     return paired_summarize([a[k] for k in scene_ids], [b[k] for k in scene_ids],
                             seed=seed, n_boot=n_boot)
+
+
+def paired_stratified_summarize_by_scene(
+        a: Mapping[str, float], b: Mapping[str, float],
+        stratum_by_scene: Mapping[str, str], seed: int = BOOTSTRAP_SEED,
+        n_boot: int = N_BOOTSTRAP) -> Summary:
+    """Stratified paired summary after exact scene and stratum-ID validation.
+
+    ``a``, ``b``, and ``stratum_by_scene`` must describe precisely the same
+    scenes.  Scene IDs are sorted within each stratum before conversion, making
+    seeded results independent of dictionary insertion order.
+    """
+    a_keys, b_keys, stratum_keys = set(a), set(b), set(stratum_by_scene)
+    if a_keys != b_keys:
+        missing_from_a = sorted(b_keys - a_keys)
+        missing_from_b = sorted(a_keys - b_keys)
+        raise ValueError(
+            "scene IDs must match exactly; "
+            f"missing from a={missing_from_a}, missing from b={missing_from_b}"
+        )
+    if a_keys != stratum_keys:
+        missing_from_strata = sorted(a_keys - stratum_keys)
+        extra_in_strata = sorted(stratum_keys - a_keys)
+        raise ValueError(
+            "stratum scene IDs must match method scene IDs exactly; "
+            f"missing from strata={missing_from_strata}, "
+            f"extra in strata={extra_in_strata}"
+        )
+    a_by_stratum = {}
+    b_by_stratum = {}
+    for scene_id in sorted(a_keys):
+        stratum = stratum_by_scene[scene_id]
+        a_by_stratum.setdefault(stratum, []).append(a[scene_id])
+        b_by_stratum.setdefault(stratum, []).append(b[scene_id])
+    return paired_stratified_summarize(a_by_stratum, b_by_stratum,
+                                       seed=seed, n_boot=n_boot)
 
 
 def needs_more_scenes(s: Summary, target_halfwidth: float = 0.05) -> bool:

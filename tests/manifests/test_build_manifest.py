@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import sys
 import tempfile
@@ -45,6 +46,9 @@ class BuildManifestTests(unittest.TestCase):
             failed = next(r for r in rows if r["dataset_role"] == "development")
             self.assertEqual((failed["status"], failed["failure_notes"]), ("failed", "boom"))
             self.assertEqual(failed["input_mask"], "/data/dev/cov20/dev_a/mask.png")
+            self.assertEqual(failed["output_hash_status"], "not_applicable_failed")
+            self.assertEqual(failed["output_sha256"], "")
+            self.assertEqual(failed["input_mask_hash_status"], "missing")
             self.assertIn("python make_dev --seed0 7", "\n".join(headers))
             self.assertIn('"cov20/lock_a":{"density":20,"seed":801}', "\n".join(headers))
             with out.open(newline="", encoding="utf-8") as fh:
@@ -53,6 +57,77 @@ class BuildManifestTests(unittest.TestCase):
             parsed = list(csv.DictReader(content[header_index:]))
             self.assertEqual(set(parsed[0]), set(BM.FIELDS))
             self.assertEqual(len(parsed), 2)
+
+    def test_hashes_artifacts_and_records_source_report_provenance(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            scene = tmp / "scene"
+            scene.mkdir()
+            input_mask = scene / "mask.png"; input_mask.write_bytes(b"input-mask")
+            ground_truth = scene / "gt_labels.tif"; ground_truth.write_bytes(b"ground-truth")
+            output = scene / "result.tif"; output.write_bytes(b"method-output")
+            row = _row("scene", "baseline_cc")
+            row.update({"input_mask": str(input_mask), "ground_truth": str(ground_truth),
+                        "output_path": str(output)})
+            report_path = tmp / "locked.json"
+            report_path.write_text(json.dumps(_report([row], str(tmp), "gen")), encoding="utf-8")
+
+            rows, _ = BM.build_manifest(report_path)
+            result = rows[0]
+            self.assertEqual(result["dataset_role"], "locked")
+            self.assertEqual(result["source_report"], str(report_path))
+            self.assertEqual(result["source_report_sha256"],
+                             hashlib.sha256(report_path.read_bytes()).hexdigest())
+            for field, artifact in (("input_mask", input_mask), ("ground_truth", ground_truth),
+                                    ("output", output)):
+                self.assertEqual(result[f"{field}_sha256"],
+                                 hashlib.sha256(artifact.read_bytes()).hexdigest())
+                self.assertEqual(result[f"{field}_hash_status"], "present")
+            self.assertEqual(result["ground_truth_selected"], str(ground_truth))
+            self.assertEqual(result["ground_truth_selected_sha256"],
+                             hashlib.sha256(ground_truth.read_bytes()).hexdigest())
+            self.assertEqual(result["ground_truth_selected_hash_status"], "present")
+
+    def test_records_overlap_aware_ground_truth_actually_selected_by_evaluator(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            scene = tmp / "scene"
+            scene.mkdir()
+            flat = scene / "gt_labels.tif"; flat.write_bytes(b"flat")
+            overlap = scene / "gt_multilabel.npz"; overlap.write_bytes(b"overlap")
+            row = _row("scene", "baseline_cc")
+            row.update({"ground_truth": str(flat)})
+            report_path = tmp / "locked.json"
+            report_path.write_text(json.dumps(_report([row], str(tmp), "gen")),
+                                   encoding="utf-8")
+
+            result = BM.build_manifest(report_path)[0][0]
+            self.assertEqual(result["ground_truth"], str(flat))
+            self.assertEqual(result["ground_truth_selected"], str(overlap))
+            self.assertEqual(result["ground_truth_selected_sha256"],
+                             hashlib.sha256(overlap.read_bytes()).hexdigest())
+            self.assertEqual(result["ground_truth_selected_hash_status"], "present")
+
+    def test_successful_missing_output_has_explicit_hash_state(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            path = tmp / "locked.json"
+            path.write_text(json.dumps(_report([_row("cov20/a", "baseline_cc")], str(tmp), "gen")),
+                            encoding="utf-8")
+            rows, _ = BM.build_manifest(path)
+            self.assertEqual(rows[0]["output_hash_status"], "missing")
+            self.assertEqual(rows[0]["output_sha256"], "")
+
+    def test_field_schema_is_stable(self):
+        self.assertEqual(BM.FIELDS, [
+            "seed", "density", "geometry_id", "dataset_role", "mask_width",
+            "degradation", "input_mask", "ground_truth", "method", "output_path",
+            "config_hash", "status", "failure_notes", "source_report",
+            "source_report_sha256", "input_mask_sha256", "input_mask_hash_status",
+            "ground_truth_sha256", "ground_truth_hash_status", "output_sha256",
+            "output_hash_status", "ground_truth_selected",
+            "ground_truth_selected_sha256", "ground_truth_selected_hash_status",
+        ])
 
     def test_duplicate_scene_method_is_rejected(self):
         with tempfile.TemporaryDirectory() as td:

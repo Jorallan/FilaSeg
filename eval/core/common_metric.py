@@ -246,11 +246,17 @@ def assign_fragments(
 # ── 3. pairwise co-assignment scores ───────────────────────────────────────
 
 
-def pairwise_scores(gt_assign: Dict[int, int], pred_assign: Dict[int, int]) -> dict:
+def pairwise_scores(
+    gt_assign: Dict[int, int], pred_assign: Dict[int, int],
+    gt_unassigned_policy: str = "singleton",
+) -> dict:
     """Permutation-invariant pairwise co-assignment scores.
 
-    Computed over exactly the fragments that have a VALID (non-zero) ground-
-    truth assignment. With n_ij the number of
+    Computed over every common fragment by default. A zero assignment is a
+    distinct singleton cluster on either side, so attaching unassigned input
+    evidence is penalized. ``gt_unassigned_policy="exclude"`` preserves the
+    historical comparison population of GT-assigned fragments only. With
+    n_ij the number of
     fragments in gt-group i and pred-group j,
         TP = sum_ij C(n_ij, 2)
         same_pred = sum_j C(b_j, 2)   (b_j = pred-group sizes)
@@ -263,16 +269,17 @@ def pairwise_scores(gt_assign: Dict[int, int], pred_assign: Dict[int, int]) -> d
     together with every other unassigned fragment into one shared "cluster
     0" -- that lumping would manufacture pairwise co-clustering between
     fragments that the prediction never actually joined. The same
-    singleton-per-unassigned-fragment treatment is applied on the
-    ground-truth side for symmetry/robustness (normally a no-op here, since
-    fragments with gt_assign == 0 are excluded from the comparison set
-    entirely, per the paragraph above).
+    singleton-per-unassigned-fragment treatment is applied on both sides.
+    Adjusted Rand index and directional VI use this identical partition.
     """
+    if gt_unassigned_policy not in {"singleton", "exclude"}:
+        raise ValueError("gt_unassigned_policy must be 'singleton' or 'exclude'")
     all_frag_ids = sorted(set(gt_assign) | set(pred_assign))
     raw_gt_all = [int(gt_assign.get(k, 0)) for k in all_frag_ids]
     raw_pred_all = [int(pred_assign.get(k, 0)) for k in all_frag_ids]
-    frag_ids = [k for k in all_frag_ids if gt_assign.get(k, 0) != 0]
-    raw_gt = [int(gt_assign[k]) for k in frag_ids]
+    frag_ids = (all_frag_ids if gt_unassigned_policy == "singleton" else
+                [k for k in all_frag_ids if gt_assign.get(k, 0) != 0])
+    raw_gt = [int(gt_assign.get(k, 0)) for k in frag_ids]
     raw_pred = [int(pred_assign.get(k, 0)) for k in frag_ids]
     n = len(frag_ids)
 
@@ -286,11 +293,20 @@ def pairwise_scores(gt_assign: Dict[int, int], pred_assign: Dict[int, int]) -> d
         "n_pred_assigned_fragments": sum(v != 0 for v in raw_pred_all),
         "n_pred_unassigned_fragments": sum(v == 0 for v in raw_pred_all),
     }
+    provenance = {
+        "gt_unassigned_policy": gt_unassigned_policy,
+        "unassigned_cluster_policy": "singleton_per_fragment",
+        "partition_population": ("all_common_fragments" if gt_unassigned_policy == "singleton"
+                                 else "gt_assigned_fragments_only"),
+    }
 
     if n < 2:
         return {
-            **coverage, "n_fragments": n, "n_scored_fragments": n,
+            **coverage, **provenance, "n_fragments": n, "n_scored_fragments": n,
             "precision": float("nan"), "recall": float("nan"), "f1": float("nan"),
+            "adjusted_rand_index": 1.0 if n == 1 else float("nan"),
+            "vi_merge_bits": 0.0 if n == 1 else float("nan"),
+            "vi_split_bits": 0.0 if n == 1 else float("nan"),
             "pair_evidence_available": False, "pair_evidence_reason": "fewer_than_two_scored_fragments",
             "n_gt_groups": n_gt_groups, "n_pred_groups": n_pred_groups,
             "n_gt_pairs": 0.0, "n_pred_pairs": 0.0, "tp": 0.0, "fp": 0.0, "fn": 0.0,
@@ -337,13 +353,32 @@ def pairwise_scores(gt_assign: Dict[int, int], pred_assign: Dict[int, int]) -> d
     else:
         evidence_reason = "ok"
 
+    # H(GT | prediction) reports merges; H(prediction | GT) reports splits.
+    n_float = float(n)
+    p_ij = n_mat.astype(float) / n_float
+    p_gt = a.astype(float) / n_float
+    p_pred = b.astype(float) / n_float
+    nz = p_ij > 0
+    gi_grid, pi_grid = np.nonzero(nz)
+    vi_merge = float(np.sum(p_ij[nz] * np.log2(p_pred[pi_grid] / p_ij[nz])))
+    vi_split = float(np.sum(p_ij[nz] * np.log2(p_gt[gi_grid] / p_ij[nz])))
+    total_pairs = n_float * (n_float - 1.0) / 2.0
+    expected_tp = same_gt * same_pred / total_pairs
+    ari_denom = 0.5 * (same_gt + same_pred) - expected_tp
+    ari = (1.0 if np.array_equal(gi, pi) else 0.0) if ari_denom == 0 else (
+        (tp - expected_tp) / ari_denom
+    )
+
     return {
-        **coverage,
+        **coverage, **provenance,
         "n_fragments": n,
         "n_scored_fragments": n,
         "precision": precision,
         "recall": recall,
         "f1": f1,
+        "adjusted_rand_index": float(ari),
+        "vi_merge_bits": vi_merge,
+        "vi_split_bits": vi_split,
         "n_gt_groups": n_gt_groups,
         "n_pred_groups": n_pred_groups,
         "pair_evidence_available": evidence_reason == "ok",
@@ -536,6 +571,7 @@ def score_method(
     max_dist_px: float = 6.0,
     coverage_thr: float = 0.8,
     purity_thr: float = 0.8,
+    gt_unassigned_policy: str = "singleton",
 ) -> dict:
     """Load the input mask, build common fragments once, score `pred`.
 
@@ -581,7 +617,7 @@ def score_method(
             common_fragment_pixels / skeleton_pixels if skeleton_pixels else float("nan")
         ),
     }
-    out.update(pairwise_scores(gt_assign, pred_assign))
+    out.update(pairwise_scores(gt_assign, pred_assign, gt_unassigned_policy))
     fragment_recovery = fragment_instance_recovery(
         gt_assign, pred_assign, coverage_thr, purity_thr
     )
@@ -614,6 +650,10 @@ def main() -> int:
     ap.add_argument("--max-dist-px", type=float, default=6.0, dest="max_dist_px")
     ap.add_argument("--coverage-thr", type=float, default=0.8, dest="coverage_thr")
     ap.add_argument("--purity-thr", type=float, default=0.8, dest="purity_thr")
+    ap.add_argument(
+        "--gt-unassigned-policy", choices=("singleton", "exclude"), default="singleton",
+        help="score GT-unassigned fragments as singleton evidence (default), or exclude them for legacy regression",
+    )
     args = ap.parse_args()
 
     scores = score_method(
@@ -624,6 +664,7 @@ def main() -> int:
         max_dist_px=args.max_dist_px,
         coverage_thr=args.coverage_thr,
         purity_thr=args.purity_thr,
+        gt_unassigned_policy=args.gt_unassigned_policy,
     )
     for k, v in scores.items():
         if isinstance(v, float):

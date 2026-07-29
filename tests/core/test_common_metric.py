@@ -276,6 +276,45 @@ class TestCommonMetric(unittest.TestCase):
         self.assertTrue(np.isnan(scores["recall"]))
         self.assertTrue(np.isnan(scores["f1"]))
 
+    # 8b. GT-unassigned fragments are evidence by default ------------------
+    def test_8b_unassigned_policy_penalizes_attachment_and_has_legacy_mode(self):
+        gt = {1: 1, 2: 1, 3: 0, 4: 0}
+        pred = {1: 9, 2: 9, 3: 10, 4: 10}
+
+        corrected = CM.pairwise_scores(gt, pred)
+        self.assertEqual(corrected["gt_unassigned_policy"], "singleton")
+        self.assertEqual(corrected["partition_population"], "all_common_fragments")
+        self.assertEqual(corrected["tp"], 1.0)
+        self.assertEqual(corrected["fp"], 1.0,
+                         "joining two GT-unassigned fragments must be penalized")
+
+        legacy = CM.pairwise_scores(gt, pred, gt_unassigned_policy="exclude")
+        self.assertEqual(legacy["partition_population"], "gt_assigned_fragments_only")
+        self.assertEqual(legacy["n_scored_fragments"], 2)
+        self.assertEqual(legacy["tp"], 1.0)
+        self.assertEqual(legacy["fp"], 0.0)
+        self.assertEqual(legacy["fn"], 0.0)
+        self.assertEqual(legacy["f1"], 1.0)
+
+    # 8c. Partition agreement uses the pairwise singletonized partitions ---
+    def test_8c_ari_and_directional_vi(self):
+        identical = CM.pairwise_scores(
+            {1: 1, 2: 1, 3: 0, 4: 0},
+            {1: 7, 2: 7, 3: 0, 4: 0},
+        )
+        self.assertEqual(identical["adjusted_rand_index"], 1.0)
+        self.assertEqual(identical["vi_merge_bits"], 0.0)
+        self.assertEqual(identical["vi_split_bits"], 0.0)
+
+        gt = {1: 1, 2: 1, 3: 2, 4: 2}
+        split = CM.pairwise_scores(gt, {1: 9, 2: 10, 3: 11, 4: 11})
+        self.assertEqual(split["vi_merge_bits"], 0.0)
+        self.assertAlmostEqual(split["vi_split_bits"], 0.5)
+
+        merge = CM.pairwise_scores(gt, {1: 9, 2: 9, 3: 9, 4: 9})
+        self.assertAlmostEqual(merge["vi_merge_bits"], 1.0)
+        self.assertEqual(merge["vi_split_bits"], 0.0)
+
     # 9. A split inside an atomic branch is a known pairwise limitation ------
     def test_9_atomic_branch_split_is_recovery_penalty_not_pair_evidence(self):
         mask = _line_mask(SHAPE, 64, 10, 64, 118, width=1)

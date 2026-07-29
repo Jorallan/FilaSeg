@@ -71,6 +71,12 @@ class ExperimentRunnerTests(unittest.TestCase):
                                     cc_min_area=1, max_gap_px=28, max_turn_deg=20,
                                     configuration_locked=True)
             self.assertTrue(doc["configuration"]["configuration_locked"])
+            self.assertEqual(doc["schema_version"], 2)
+            self.assertEqual(doc["configuration"]["gt_unassigned_policy"], "singleton")
+            self.assertEqual(
+                doc["configuration"]["overall_bootstrap"],
+                "within_density_then_scene_weighted_pooling",
+            )
 
     def test_resume_requires_complete_existing_output(self):
         with tempfile.TemporaryDirectory() as td:
